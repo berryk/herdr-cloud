@@ -3,6 +3,7 @@ import { z } from "zod";
 import { benchmarksPage, connectPage, costsPage, indexPage, peoplePage, settingsPage, terminalPage, tooManyPage } from "./page.js";
 import { INSTANCES, PRICE, SIZES, bill, cost, emptyUsage, hourly, month, type Usage } from "./meter.js";
 import { identify, type AuthEnv, type Identity } from "./auth.js";
+import { caPublicLine, signHostKey } from "./sshcert.js";
 import { SecretsUpdate, applyUpdate, seal, sealBytes, unseal, unsealBytes, view, type Sealed, type Secrets, type SecretsView } from "./secrets.js";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -34,6 +35,8 @@ interface Env extends AuthEnv {
   /** The admin's fallbacks when their settings do not set these. */
   CLAUDE_CODE_OAUTH_TOKEN?: string;
   GITHUB_TOKEN?: string;
+  /** Ed25519 private key (PKCS#8 DER, base64) that signs workspaces' SSH host keys (src/sshcert.ts). */
+  SSH_CA_KEY?: string;
   /** 32 random bytes, base64: encrypts each user's stored secrets. */
   SECRETS_KEY?: string;
   /** Home-folder archives: carry ~/ across image upgrades, and a second copy beside the snapshot. */
@@ -74,6 +77,8 @@ interface State {
   journal?: Journal;
   /** Hash of each saved login's file as this workspace last had it (see #syncLogins). */
   loginsSeen?: Record<string, string>;
+  /** The host key the workspace's SSH certificate is for, and when the certificate expires. */
+  hostCert?: { pub: string; until: number };
   /** Chrome sign-ins: the saved copy this workspace last merged or made, and its cookie
    *  database's hash at that point (see #syncBrowser). */
   browserSeen?: string;
@@ -214,6 +219,8 @@ export class Workspace extends DurableObject<Env> {
   readonly #c: Container;
   /** Short-lived write token for the current journal repo, kept in memory only. */
   #token?: { repo: string; value: string; expires: number };
+  /** sshd has a host certificate for the running container (signed once per container start). */
+  #hostCert = false;
   /** Open terminal and browser-viewer sockets, closed cleanly when we go to sleep. */
   readonly #sockets = new Set<WebSocket>();
 
@@ -488,6 +495,7 @@ export class Workspace extends DurableObject<Env> {
       labels: { app: "herdr-cloud", workspace: slug(name) },
     };
     const image = this.#c.images.workstation;
+    this.#hostCert = false;
     // Cloudflare can stop a container without warning, leaving the snapshot older than the
     // periodic home archive. Then the archive is the better copy, as it is after an image change.
     const archiveNewer = !!s.homeBackup && s.homeBackup.at > (s.lastCheckpoint?.at ?? 0);
@@ -1044,11 +1052,45 @@ export class Workspace extends DurableObject<Env> {
   /** SSH from a laptop (see the /ssh/ route): bridge the WebSocket to the workspace's sshd. A
    *  sleeping workspace is only woken when asked (hcw-): Herdr's saved machines retry on their own
    *  every couple of minutes and would otherwise never let it sleep. */
+  /** Sign this workspace's SSH host key as hc-<name> and hcw-<name>, so laptops that trust the
+   *  herdr-cloud key accept it with strict checking (Herdr's machine add insists on that). */
+  async #certifyHost(name: string): Promise<void> {
+    if (this.#hostCert || !this.env.SSH_CA_KEY) return;
+    try {
+      const key = `${HOME}/.herdr-cloud/ssh/ssh_host_ed25519_key`;
+      const pub = (await this.#run(["cat", `${key}.pub`])).out.trim();
+      if (!pub) return;
+      // The certificate lives beside the key in the home folder, so it outlasts restarts: sign
+      // again only for a new key or one that expires within a week.
+      const had = (await this.#state()).hostCert;
+      if (had?.pub === pub && had.until - Date.now() > 7 * 86400_000) {
+        this.#hostCert = true;
+        return;
+      }
+      const short = shortName(name);
+      const days = 30;
+      const cert = await signHostKey(this.env.SSH_CA_KEY, pub, [`hc-${short}`, `hcw-${short}`], short, days);
+      const body = new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(cert + "\n")), c.close()) });
+      const write = await this.#c.exec(["sh", "-c", `cat > ${key}-cert.pub.tmp && mv -f ${key}-cert.pub.tmp ${key}-cert.pub`], { user: "dev", cwd: HOME, stdin: body });
+      if ((await write.output()).exitCode !== 0) return;
+      // sshd reads host certificates when it starts or gets a HUP. It re-executes on a HUP, so
+      // wait until it listens again before handing it a connection.
+      const reload = "[ -f /run/sshd.pid ] && kill -HUP $(cat /run/sshd.pid); sleep 0.2; for i in $(seq 50); do bash -c 'exec 3<>/dev/tcp/127.0.0.1/22' 2>/dev/null && exit 0; sleep 0.1; done";
+      await (await this.#c.exec(["sh", "-c", reload])).output();
+      await this.#save({ hostCert: { pub, until: Date.now() + days * 86400_000 } });
+      this.#hostCert = true;
+      console.log({ event: "ssh.cert.signed", workspace: name });
+    } catch (e) {
+      console.error({ event: "ssh.cert.failed", workspace: name, error: String(e) });
+    }
+  }
+
   async #ssh(name: string, wake: boolean): Promise<Response> {
     if (!this.#c.running && !wake) return new Response("asleep: ssh to it from a terminal, or open it in the browser, to wake it", { status: 409 });
     await this.#ensureRunning(name);
     await this.#touch();
     await this.#ensureHerdr(name);
+    await this.#certifyHost(name);
     const sock = this.#c.getTcpPort(SSH_PORT).connect(`10.0.0.1:${SSH_PORT}`);
     const [client, server] = Object.values(new WebSocketPair());
     server.binaryType = "arraybuffer";
@@ -1325,7 +1367,14 @@ export default {
     // gets the bytes. The hc- prefix lets one ssh_config block cover every workspace. /ssh/wake/
     // (which the ssh_config uses when ssh runs in a terminal) and hcw- also wake a sleeping one;
     // plain hc- does not, because Herdr clients reconnect by themselves.
+    if (url.pathname === "/api/ssh-ca" && request.method === "GET") {
+      if (!env.SSH_CA_KEY) return new Response("no SSH CA configured", { status: 404 });
+      return new Response(`@cert-authority hc-*,hcw-* ${await caPublicLine(env.SSH_CA_KEY)}\n`, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
     const sh = /^\/ssh\/(wake\/)?(hcw?-)?([^/]+)$/.exec(url.pathname);
+    // Only a WebSocket upgrade is an SSH connection: anything else must not wake the workspace,
+    // count as use, or open a connection to its sshd.
+    if (sh && request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("SSH connections only (cloudflared access ssh)", { status: 426, headers: { Upgrade: "websocket" } });
     if (sh) {
       const name = canonical(sh[3]);
       if (!NAME.test(name)) return new Response("bad workspace name", { status: 400 });

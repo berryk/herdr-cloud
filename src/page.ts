@@ -134,10 +134,14 @@ ol li,ul li{margin:4px 0}</style></head>
 <h2>From a laptop (one-time setup)</h2>
 <ol>
 <li>Install <code>cloudflared</code>: <code>brew install cloudflared</code> on a Mac, <code>winget install Cloudflare.cloudflared</code> on Windows, or the package from <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/">Cloudflare's downloads</a> on Linux.</li>
-<li>Add this to <code>~/.ssh/config</code> (create the file if it does not exist):</li>
+<li>Save the herdr-cloud host key, so SSH and Herdr can check every workspace is really yours (one line, the same for every workspace, new or recreated):</li>
 </ol>
-<pre id="sshcfg"></pre>
-<p class="dim">The first connection opens your browser to sign in, as you do here; there are no SSH keys to manage. The connection runs inside Cloudflare's encrypted link, so host keys are not checked (a recreated workspace would otherwise look like a different machine).</p>
+<div id="cakey"></div>
+<ol start="3">
+<li>Add this to <code>~/.ssh/config</code> (on Windows <code>C:\\Users\\&lt;you&gt;\\.ssh\\config</code>; create the file if it does not exist):</li>
+</ol>
+<div id="sshcfg"></div>
+<p class="dim">The first connection opens your browser to sign in, as you do here; there are no SSH keys to manage. On Windows without Git for Windows, leave out the first two lines (the <code>Match</code> block needs Git's <code>test</code>) and use <code>hcw-&lt;name&gt;</code> when you want SSH to wake a sleeping workspace. In WSL, install the Linux <code>cloudflared</code> inside WSL: the Windows one does not count.</p>
 
 <h2>SSH</h2>
 <p>Each workspace is <code>hc-&lt;name&gt;</code>:</p>
@@ -165,6 +169,7 @@ ol li,ul li{margin:4px 0}</style></head>
 <tr><th>You see</th><th>Do this</th></tr>
 <tr><td><code>websocket: bad handshake</code></td><td>The workspace is asleep and the connection was not typed in a terminal: run <code>ssh hc-&lt;name&gt; true</code>, or use <code>hcw-&lt;name&gt;</code>.</td></tr>
 <tr><td>Herdr shows the machine as reconnecting or <b>! error</b></td><td>Same: it is probably asleep. Wake it with <code>ssh hc-&lt;name&gt; true</code>.</td></tr>
+<tr><td><code>Host key verification failed</code> or <code>No ED25519 host key is known</code></td><td>The host key file from step 2 is missing, or the workspace has not had its key signed yet: connect once with <code>ssh hc-&lt;name&gt; true</code> from a terminal, which signs it, then retry.</td></tr>
 <tr><td>A browser window keeps opening to sign in</td><td>Your Cloudflare sign-in expired. Run <code>cloudflared access login https://<span class="host"></span></code> once.</td></tr>
 <tr><td><code>workspace limit reached</code></td><td>Delete a workspace you no longer need on the <a href="/">list</a>.</td></tr>
 <tr><td>The first connection hangs</td><td>A workspace that has never run takes about a minute to start. Try again once it has.</td></tr>
@@ -178,7 +183,7 @@ const cfg = ['Match host hc-* exec "test -t 2"',
   "  ProxyCommand cloudflared access ssh --hostname https://" + host + "/ssh/wake/%n",
   "Host hc-* hcw-*", "  User dev",
   "  ProxyCommand cloudflared access ssh --hostname https://" + host + "/ssh/%n",
-  "  UserKnownHostsFile /dev/null", "  StrictHostKeyChecking no", "  LogLevel ERROR",
+  "  UserKnownHostsFile ~/.ssh/known_hosts_herdr_cloud", "  StrictHostKeyChecking yes", "  LogLevel ERROR",
   "  PreferredAuthentications none", "  ServerAliveInterval 30"].join("\\n");
 // A code block with a Copy button.
 const block = text => {
@@ -188,6 +193,13 @@ const block = text => {
   pre.append(code, b); return pre;
 };
 document.getElementById("sshcfg").replaceWith(block(cfg));
+// The CA line: as a command for Mac, Linux and WSL, and for Windows PowerShell.
+fetch("/api/ssh-ca").then(r => r.ok ? r.text() : "").then(line => {
+  line = line.trim(); if (!line) return;
+  const box = document.getElementById("cakey");
+  box.append(document.createTextNode("Mac, Linux or WSL:"), block("mkdir -p ~/.ssh && echo '" + line + "' > ~/.ssh/known_hosts_herdr_cloud"),
+    document.createTextNode("Windows (PowerShell):"), block("Set-Content -Encoding ascii $HOME\\\\.ssh\\\\known_hosts_herdr_cloud '" + line + "'"));
+});
 fetch("/api/workspaces").then(r => r.json()).then(ws => {
   const names = ws.map(w => w.name); const n = names[0] || "main";
   const sshEx = ["ssh hc-" + n + "                 # a shell (wakes it if asleep)", "ssh hc-" + n + " true            # just wake it",

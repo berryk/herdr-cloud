@@ -48,6 +48,7 @@ Secrets:
 
 ```sh
 openssl rand -base64 32 | npx wrangler secret put SECRETS_KEY   # encrypts users' stored secrets; keep a copy
+openssl genpkey -algorithm ed25519 | openssl pkey -outform DER | base64 -w0 | npx wrangler secret put SSH_CA_KEY   # signs workspaces' SSH host keys; keep a copy
 npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN                 # optional admin fallback, from `claude setup-token`
 npx wrangler secret put GITHUB_TOKEN                            # optional admin fallback
 ```

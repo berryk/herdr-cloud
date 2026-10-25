@@ -81,9 +81,13 @@ RUN printf 'export PATH=$HOME/.local/bin:$PATH\neval "$(starship init zsh)"\neva
 # SSH, for Herdr clients and ssh on laptops. sshd is reachable only through the Worker's /ssh/
 # route, after Cloudflare Access has checked who you are, so that is the login: dev has an empty
 # password, which sshd accepts as its "none" method. The image's shared host keys are removed; each
-# workspace makes its own (init.sh), kept in the home folder so it survives image upgrades.
+# workspace makes its own (init.sh), kept in the home folder so it survives image upgrades. The
+# Durable Object signs it with the herdr-cloud SSH CA (the certificate appears after the first SSH
+# connection), so laptops check it strictly. ClientAlive closes sessions whose laptop went away.
 RUN rm -f /etc/ssh/ssh_host_* && passwd -d dev \
-  && printf '%s\n' 'HostKey /home/dev/.herdr-cloud/ssh/ssh_host_ed25519_key' 'AllowUsers dev' 'PermitRootLogin no' \
+  && printf '%s\n' 'HostKey /home/dev/.herdr-cloud/ssh/ssh_host_ed25519_key' \
+      'HostCertificate /home/dev/.herdr-cloud/ssh/ssh_host_ed25519_key-cert.pub' \
+      'ClientAliveInterval 30' 'ClientAliveCountMax 4' 'AllowUsers dev' 'PermitRootLogin no' \
       'PasswordAuthentication yes' 'PermitEmptyPasswords yes' 'KbdInteractiveAuthentication no' 'UsePAM no' \
       'PrintMotd no' 'AcceptEnv LANG LC_* COLORTERM TERM_PROGRAM' > /etc/ssh/sshd_config.d/herdr-cloud.conf
 # kasmvncserver will not start without at least one user. -DisableBasicAuth means the
