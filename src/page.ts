@@ -132,6 +132,7 @@ ol li,ul li{margin:4px 0}</style></head>
 <p>Open the workspace from the <a href="/">list</a> (or go to <code>/w/&lt;name&gt;</code>). A sleeping workspace wakes when you open it, which takes up to a minute. On a phone, the key bar above the keyboard has Ctrl, Esc, Tab, the arrows, paste and the Herdr prefix (<code>^B</code>); swipe to scroll.</p>
 
 <h2>From a laptop (one-time setup)</h2>
+<p class="dim"><b>Set up before 25 October 2026?</b> Do step 2, then in your ssh config change <code>UserKnownHostsFile /dev/null</code> to <code>UserKnownHostsFile ~/.ssh/known_hosts_herdr_cloud</code> and <code>StrictHostKeyChecking no</code> (or <code>accept-new</code>) to <code>yes</code>. Herdr needs this to add a workspace as a machine.</p>
 <ol>
 <li>Install <code>cloudflared</code>: <code>brew install cloudflared</code> on a Mac, <code>winget install Cloudflare.cloudflared</code> on Windows, or the package from <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/">Cloudflare's downloads</a> on Linux.</li>
 <li>Save the herdr-cloud host key, so SSH and Herdr can check every workspace is really yours (one line, the same for every workspace, new or recreated):</li>
@@ -146,15 +147,15 @@ ol li,ul li{margin:4px 0}</style></head>
 <h2>SSH</h2>
 <p>Each workspace is <code>hc-&lt;name&gt;</code>:</p>
 <div id="ssh-examples"></div>
-<p>Typing <code>ssh</code> in a terminal wakes a sleeping workspace. <code>scp</code>, <code>rsync</code> and <code>sftp</code> work the same way (use <code>hcw-&lt;name&gt;</code> if one has to wake it, as they are not typed in a terminal). A plain SSH shell does not get your <a href="/settings">secrets</a>; panes inside Herdr do, so run Claude there.</p>
+<p>Typing <code>ssh</code> in a terminal wakes a sleeping workspace (on Windows only with Git for Windows installed; <code>hcw-&lt;name&gt;</code> always wakes it). <code>scp</code>, <code>rsync</code> and <code>sftp</code> work the same way (use <code>hcw-&lt;name&gt;</code> if one has to wake it, as they are not typed in a terminal). A plain SSH shell does not get your <a href="/settings">secrets</a>; panes inside Herdr do, so run Claude there.</p>
 
 <h2>Herdr on your laptop</h2>
 <p>Add each workspace as a machine, once. Its workspaces and agents then appear in your local Herdr sidebar beside your own:</p>
 <div id="herdr-examples"></div>
-<p>Herdr reconnects by itself, but it never wakes a sleeping workspace, so a Herdr left open cannot keep one awake. After a workspace has slept, wake it with <code>ssh hc-&lt;name&gt; true</code> (or open it here); Herdr reconnects within a couple of minutes. To attach to just one workspace without saving it: <code>herdr --remote hc-&lt;name&gt;</code>.</p>
+<p>Herdr reconnects by itself, but it never wakes a sleeping workspace, so a Herdr left open cannot keep one awake. After a workspace has slept, wake it with <code>ssh hcw-&lt;name&gt; true</code> (or open it here); Herdr reconnects within a couple of minutes. Keep Herdr on your laptop up to date: workspaces run the latest release. To attach to just one workspace without saving it: <code>herdr --remote hc-&lt;name&gt;</code>.</p>
 
 <h2>VS Code, Cursor and other editors</h2>
-<p>Remote-SSH works with the same names: <b>Remote-SSH: Connect to Host…</b> then <code>hc-&lt;name&gt;</code>, and open <code>/home/dev/work</code>. Wake a sleeping workspace with <code>ssh hc-&lt;name&gt; true</code> first.</p>
+<p>Remote-SSH works with the same names: <b>Remote-SSH: Connect to Host…</b> then <code>hc-&lt;name&gt;</code>, and open <code>/home/dev/work</code>. Wake a sleeping workspace with <code>ssh hcw-&lt;name&gt; true</code> first.</p>
 
 <h2>When it sleeps</h2>
 <table>
@@ -167,9 +168,10 @@ ol li,ul li{margin:4px 0}</style></head>
 <h2>If something goes wrong</h2>
 <table>
 <tr><th>You see</th><th>Do this</th></tr>
-<tr><td><code>websocket: bad handshake</code></td><td>The workspace is asleep and the connection was not typed in a terminal: run <code>ssh hc-&lt;name&gt; true</code>, or use <code>hcw-&lt;name&gt;</code>.</td></tr>
-<tr><td>Herdr shows the machine as reconnecting or <b>! error</b></td><td>Same: it is probably asleep. Wake it with <code>ssh hc-&lt;name&gt; true</code>.</td></tr>
-<tr><td><code>Host key verification failed</code> or <code>No ED25519 host key is known</code></td><td>The host key file from step 2 is missing, or the workspace has not had its key signed yet: connect once with <code>ssh hc-&lt;name&gt; true</code> from a terminal, which signs it, then retry.</td></tr>
+<tr><td><code>websocket: bad handshake</code></td><td>The workspace is asleep and the connection was not typed in a terminal: run <code>ssh hcw-&lt;name&gt; true</code>.</td></tr>
+<tr><td>Herdr shows the machine as reconnecting or <b>! error</b></td><td>Same: it is probably asleep. Wake it with <code>ssh hcw-&lt;name&gt; true</code>.</td></tr>
+<tr><td><code>Host key verification failed</code> or <code>No ED25519 host key is known</code></td><td>The host key file from step 2 is missing, or your ssh config still says <code>/dev/null</code> (see the note under the laptop setup). A workspace that has not restarted since 25 October 2026 also fails: press <b>Sleep now</b> on its page, then connect again.</td></tr>
+<tr><td><code>EOF</code> or <code>failed to get app info</code>, now and then</td><td>The link between your laptop and Cloudflare dropped. Update <code>cloudflared</code> (<code>brew upgrade cloudflared</code>, <code>winget upgrade Cloudflare.cloudflared</code>) and retry; Herdr retries by itself.</td></tr>
 <tr><td>A browser window keeps opening to sign in</td><td>Your Cloudflare sign-in expired. Run <code>cloudflared access login https://<span class="host"></span></code> once.</td></tr>
 <tr><td><code>workspace limit reached</code></td><td>Delete a workspace you no longer need on the <a href="/">list</a>.</td></tr>
 <tr><td>The first connection hangs</td><td>A workspace that has never run takes about a minute to start. Try again once it has.</td></tr>
@@ -202,10 +204,10 @@ fetch("/api/ssh-ca").then(r => r.ok ? r.text() : "").then(line => {
 });
 fetch("/api/workspaces").then(r => r.json()).then(ws => {
   const names = ws.map(w => w.name); const n = names[0] || "main";
-  const sshEx = ["ssh hc-" + n + "                 # a shell (wakes it if asleep)", "ssh hc-" + n + " true            # just wake it",
+  const sshEx = ["ssh hc-" + n + "                 # a shell (wakes it if asleep)", "ssh hcw-" + n + " true           # just wake it",
     "scp notes.md hc-" + n + ":work/       # copy a file in"].join("\\n");
   document.getElementById("ssh-examples").append(block(sshEx));
-  const herdrEx = (names.length ? names : ["main"]).map(x => "herdr machine add hc-" + x).join("\\n");
+  const herdrEx = (names.length ? names : ["main"]).map(x => "herdr machine add hc-" + x + " --label " + x).join("\\n");
   document.getElementById("herdr-examples").append(block(herdrEx));
 });
 </script></body></html>`;
@@ -389,7 +391,10 @@ export const terminalPage = (name: string) => `<!doctype html>
 #pad.open{display:grid}#pad button{height:auto;font-size:18px}#pad button.ret{background:#2a4a6a}
 /* iOS zooms into inputs under 16px, which the terminal's hidden input would trigger on every tap. */
 .xterm-helper-textarea{font-size:16px!important}
+/* Touch devices only. A touchscreen laptop (Windows can report its primary pointer as touch) also
+   has a trackpad or mouse, and a keyboard, so any fine pointer hides the bar. */
 @media (pointer:coarse){#kb{display:block}}
+@media (any-pointer:fine){#kb{display:none}}
 @media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
 <body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
 <button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
