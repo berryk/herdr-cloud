@@ -397,7 +397,7 @@ body.phone #kb,body.kb-show #kb{display:block}
 body.kb-hide #kb{display:none}
 @media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
 <body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
-<button id="keys" title="Show or hide the phone key bar">keys</button><button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
+<button id="kbtoggle" title="Show or hide the phone key bar">keys</button><button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
 <div id="kb"><div id="pad"></div><div id="keys"></div></div>
 <script type="module">
 import { Terminal } from "${XTERM}/lib/xterm.mjs";
@@ -518,16 +518,17 @@ tEl.addEventListener("touchend", () => {
 }, { capture: true, passive: true });
 term.onResize(({ cols, rows }) => send(JSON.stringify({ cols, rows })));
 addEventListener("resize", () => fit.fit());
-// The key bar shows on phones and tablets, told apart by the user agent (an iPad says Macintosh but
-// has touch); the keys button shows or hides it by hand, remembered on this device.
+// The key bar shows on phones and tablets, told apart by the user agent. In desktop mode an iPad
+// says Macintosh and Chrome on a tablet or unfolded phone says Linux, but both have touch; Windows
+// touchscreen laptops don't get the bar. The keys button shows or hides it by hand, remembered here.
 const ua = navigator.userAgent;
-if (navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod|Mobi/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1))
+if (navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod|Mobi/.test(ua) || (/Macintosh|Linux/.test(ua) && !/CrOS/.test(ua) && navigator.maxTouchPoints > 0))
   document.body.classList.add("phone");
 const kbPref = (() => { try { return localStorage.getItem("hc-keys"); } catch { return null; } })();
 if (kbPref) document.body.classList.add("kb-" + kbPref);
 fit.fit();
 const kbShown = () => getComputedStyle(document.getElementById("kb")).display !== "none";
-document.getElementById("keys").onclick = () => {
+document.getElementById("kbtoggle").onclick = () => {
   const next = kbShown() ? "hide" : "show";
   document.body.classList.remove("kb-show", "kb-hide"); document.body.classList.add("kb-" + next);
   try { localStorage.setItem("hc-keys", next); } catch {}
