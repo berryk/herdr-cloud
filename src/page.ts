@@ -375,9 +375,9 @@ export const terminalPage = (name: string) => `<!doctype html>
 /* iOS zooms into inputs under 16px, which the terminal's hidden input would trigger on every tap. */
 .xterm-helper-textarea{font-size:16px!important}
 @media (pointer:coarse){#kb{display:block}}
-@media (max-width:640px){#cost,#costs{display:none}}</style></head>
+@media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
 <body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
-<button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
+<button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
 <div id="kb"><div id="pad"></div><div id="keys"></div></div>
 <script type="module">
 import { Terminal } from "${XTERM}/lib/xterm.mjs";
@@ -388,6 +388,18 @@ const st = document.getElementById("st");
 await Promise.race([document.fonts.load('14px "JetBrains Mono"'), new Promise(r => setTimeout(r, 3000))]);
 const term = new Terminal({ macOptionClickForcesSelection: true, scrollback: 10000, fontSize: 14, fontFamily: ${JSON.stringify(FONT_FAMILY)} });
 const fit = new FitAddon(); term.loadAddon(fit); term.open(document.getElementById("t")); fit.fit();
+// Herdr copies a selection by sending it to the terminal (OSC 52): hand it to the browser's clipboard.
+// Browsers can refuse without a recent click or key press; then a Copy button copies it on tap.
+const copyBtn = document.getElementById("copy"); let copyText = "";
+const copied = () => { const was = st.textContent; st.textContent = "copied to clipboard"; setTimeout(() => { if (st.textContent === "copied to clipboard") st.textContent = was; }, 1500); };
+copyBtn.onclick = () => navigator.clipboard.writeText(copyText).then(() => { copyBtn.hidden = true; copied(); }, () => { st.textContent = "copy blocked by the browser"; });
+term.parser.registerOscHandler(52, data => {
+  const b64 = data.slice(data.indexOf(";") + 1);
+  if (!b64 || b64 === "?") return true; // a request to read the clipboard: not offered
+  try { copyText = new TextDecoder().decode(Uint8Array.from(atob(b64), c => c.charCodeAt(0))); } catch { return true; }
+  navigator.clipboard.writeText(copyText).then(() => { copyBtn.hidden = true; copied(); }, () => { copyBtn.hidden = false; });
+  return true;
+});
 // xterm turns Ctrl+V into a literal ^V and swallows the browser's paste. Let the browser paste instead.
 term.attachCustomKeyEventHandler(e => !(e.type === "keydown" && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "v"));
 const enc = new TextEncoder(); let sock, tries = 0;

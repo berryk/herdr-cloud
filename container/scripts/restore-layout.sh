@@ -14,11 +14,20 @@ done
 sleep 2  # let herdr finish rebuilding panes
 PANES=$(herdr pane list 2>/dev/null)
 NATIVE=0; herdr integration status 2>/dev/null | grep -q '^claude: current' && NATIVE=1
+claude_in() {
+  herdr pane process-info --pane "$1" 2>/dev/null \
+    | jq -e '[.result.process_info.foreground_processes[]?.name] | index("claude")' >/dev/null
+}
 jq -c '.[]' "$SAVED" | while read -r a; do
   pane=$(echo "$a" | jq -r .pane_id); cwd=$(echo "$a" | jq -r .cwd); busy=$(echo "$a" | jq -r .busy)
-  # The pane's own conversation when Herdr knew it, else the latest one in that folder.
+  # The pane's own conversation when Claude saved one, else the latest one in that folder, else a
+  # fresh Claude. Claude saves a conversation only after its first message, so a session Herdr knew
+  # can have nothing to resume.
   session=$(echo "$a" | jq -r '.session // empty' | tr -cd 'A-Za-z0-9-')
-  resume="--continue"; [ -n "$session" ] && resume="--resume $session"
+  proj="$HOME/.claude/projects/$(printf %s "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+  resume=""
+  if [ -n "$session" ] && [ -f "$proj/$session.jsonl" ]; then resume="--resume $session"
+  elif ls "$proj"/*.jsonl >/dev/null 2>&1; then resume="--continue"; fi
   if ! echo "$PANES" | grep -q "\"$pane\""; then
     # Pane not restored: give it a fresh workspace in the same folder.
     pane=$(herdr workspace create --cwd "$cwd" --label "$(basename "$cwd")" --no-focus 2>/dev/null | jq -r '.result.root_pane.pane_id // empty')
@@ -28,8 +37,13 @@ jq -c '.[]' "$SAVED" | while read -r a; do
   # Give it a moment; if it did, only pass on the carry-on prompt to panes that were busy.
   n=0; [ -n "$session" ] && [ "$NATIVE" = 1 ] && n=20
   while :; do
-    if herdr pane process-info --pane "$pane" 2>/dev/null \
-        | jq -e '[.result.process_info.foreground_processes[]?.name] | index("claude")' >/dev/null; then
+    if claude_in "$pane"; then
+      if [ -n "$session" ] && [ "$resume" != "--resume $session" ]; then
+        # Herdr is resuming a session Claude never saved: it will say so and exit. Wait, then
+        # start Claude ourselves.
+        w=0; while claude_in "$pane" && [ "$w" -lt 60 ]; do w=$((w + 1)); sleep 1; done
+        echo "herdr's resume in $pane had no conversation"; break
+      fi
       if [ "$busy" = "true" ]; then
         herdr agent wait "$pane" --timeout 60000 >/dev/null 2>&1
         herdr agent prompt "$pane" "$PROMPT" >/dev/null 2>&1 && echo "prompted $pane (herdr resumed it)" || echo "could not prompt $pane"
@@ -41,7 +55,7 @@ jq -c '.[]' "$SAVED" | while read -r a; do
     [ "$n" -gt 0 ] || break
     n=$((n - 1)); sleep 1
   done
-  if [ "$busy" = "true" ]; then
+  if [ "$busy" = "true" ] && [ -n "$resume" ]; then
     herdr pane run "$pane" "cd '$cwd' && claude $resume '$PROMPT'"
   else
     herdr pane run "$pane" "cd '$cwd' && claude $resume"
