@@ -1277,11 +1277,14 @@ export default {
       return Response.json(
         people.map((p) => {
           const mine = (k: string) => ownerOf(env, k) === p.email;
+          const spent = (k: string) => (thisMonth[k] ? cost(thisMonth[k]).total : 0);
           return {
             ...p,
             admin: p.email === env.ADMIN_EMAIL.toLowerCase(),
-            workspaces: registry.filter((w) => mine(w.name)).length,
-            cost: Object.entries(thisMonth).filter(([k]) => mine(k)).reduce((t, [, u]) => t + cost(u).total, 0),
+            workspaces: registry
+              .filter((w) => mine(w.name))
+              .map((w) => ({ name: w.name.slice(w.name.indexOf("/") + 1), created: w.created, lastOpened: w.lastOpened, cost: spent(w.name) })),
+            cost: Object.keys(thisMonth).filter(mine).reduce((t, k) => t + spent(k), 0),
           };
         }),
       );
