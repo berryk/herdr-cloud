@@ -392,12 +392,15 @@ export const terminalPage = (name: string) => `<!doctype html>
 /* iOS zooms into inputs under 16px, which the terminal's hidden input would trigger on every tap. */
 .xterm-helper-textarea{font-size:16px!important}
 /* Touch devices only. A touchscreen laptop (Windows can report its primary pointer as touch) also
-   has a trackpad or mouse, and a keyboard, so any fine pointer hides the bar. */
+   has a trackpad or mouse, and a keyboard, so any fine pointer hides the bar, as does moving a
+   mouse (body.mouse). The keys button overrides both (body.kb-show / body.kb-hide). */
 @media (pointer:coarse){#kb{display:block}}
 @media (any-pointer:fine){#kb{display:none}}
+body.mouse #kb,body.kb-hide #kb{display:none}
+body.kb-show #kb{display:block}
 @media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
 <body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
-<button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
+<button id="keys" title="Show or hide the phone key bar">keys</button><button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
 <div id="kb"><div id="pad"></div><div id="keys"></div></div>
 <script type="module">
 import { Terminal } from "${XTERM}/lib/xterm.mjs";
@@ -518,6 +521,20 @@ tEl.addEventListener("touchend", () => {
 }, { capture: true, passive: true });
 term.onResize(({ cols, rows }) => send(JSON.stringify({ cols, rows })));
 addEventListener("resize", () => fit.fit());
+// The key bar: a mouse or trackpad moving means a laptop, so hide it (phones only send touch);
+// the keys button shows or hides it by hand, remembered on this device.
+const kbPref = (() => { try { return localStorage.getItem("hc-keys"); } catch { return null; } })();
+if (kbPref) document.body.classList.add("kb-" + kbPref);
+const kbShown = () => getComputedStyle(document.getElementById("kb")).display !== "none";
+addEventListener("pointermove", e => {
+  if (e.pointerType === "mouse" && !document.body.classList.contains("mouse")) { document.body.classList.add("mouse"); fit.fit(); }
+}, { passive: true });
+document.getElementById("keys").onclick = () => {
+  const next = kbShown() ? "hide" : "show";
+  document.body.classList.remove("kb-show", "kb-hide"); document.body.classList.add("kb-" + next);
+  try { localStorage.setItem("hc-keys", next); } catch {}
+  fit.fit(); term.focus();
+};
 // On phones the keyboard shrinks the visual viewport, not the layout one: follow it so the
 // prompt and the extra keys stay above the keyboard.
 if (window.visualViewport) visualViewport.addEventListener("resize", () => {
