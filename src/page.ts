@@ -391,13 +391,10 @@ export const terminalPage = (name: string) => `<!doctype html>
 #pad.open{display:grid}#pad button{height:auto;font-size:18px}#pad button.ret{background:#2a4a6a}
 /* iOS zooms into inputs under 16px, which the terminal's hidden input would trigger on every tap. */
 .xterm-helper-textarea{font-size:16px!important}
-/* Touch devices only. A touchscreen laptop (Windows can report its primary pointer as touch) also
-   has a trackpad or mouse, and a keyboard, so any fine pointer hides the bar, as does moving a
-   mouse (body.mouse). The keys button overrides both (body.kb-show / body.kb-hide). */
-@media (pointer:coarse){#kb{display:block}}
-@media (any-pointer:fine){#kb{display:none}}
-body.mouse #kb,body.kb-hide #kb{display:none}
-body.kb-show #kb{display:block}
+/* Phones and tablets only (body.phone, from the browser's user agent): pointer media queries
+   can't tell a Surface from an Android phone. The keys button overrides it (body.kb-show / kb-hide). */
+body.phone #kb,body.kb-show #kb{display:block}
+body.kb-hide #kb{display:none}
 @media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
 <body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
 <button id="keys" title="Show or hide the phone key bar">keys</button><button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
@@ -521,14 +518,15 @@ tEl.addEventListener("touchend", () => {
 }, { capture: true, passive: true });
 term.onResize(({ cols, rows }) => send(JSON.stringify({ cols, rows })));
 addEventListener("resize", () => fit.fit());
-// The key bar: a mouse or trackpad moving means a laptop, so hide it (phones only send touch);
-// the keys button shows or hides it by hand, remembered on this device.
+// The key bar shows on phones and tablets, told apart by the user agent (an iPad says Macintosh but
+// has touch); the keys button shows or hides it by hand, remembered on this device.
+const ua = navigator.userAgent;
+if (navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod|Mobi/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1))
+  document.body.classList.add("phone");
 const kbPref = (() => { try { return localStorage.getItem("hc-keys"); } catch { return null; } })();
 if (kbPref) document.body.classList.add("kb-" + kbPref);
+fit.fit();
 const kbShown = () => getComputedStyle(document.getElementById("kb")).display !== "none";
-addEventListener("pointermove", e => {
-  if (e.pointerType === "mouse" && !document.body.classList.contains("mouse")) { document.body.classList.add("mouse"); fit.fit(); }
-}, { passive: true });
 document.getElementById("keys").onclick = () => {
   const next = kbShown() ? "hide" : "show";
   document.body.classList.remove("kb-show", "kb-hide"); document.body.classList.add("kb-" + next);
