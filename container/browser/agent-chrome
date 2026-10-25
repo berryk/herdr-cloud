@@ -1,0 +1,29 @@
+#!/bin/sh
+# agent-chrome: headful Chrome on the KasmVNC display with CDP on 127.0.0.1:9222.
+# Agents drive it (chrome-devtools-mcp --browserUrl); you watch the same window at
+# /w/<name>/browser/ and can take the mouse. Profile persists in ~/.local/share.
+#
+# --no-sandbox: the container has no user namespaces for Chrome's sandbox, and the
+# container itself is the isolation boundary. --test-type hides the warning bar it causes.
+# --password-store=basic: cookies use Chrome's fixed key rather than a keyring, so the saved copy
+# browser-logins.sh carries between workspaces reads the same in each.
+PROFILE="${AGENT_CHROME_PROFILE:-$HOME/.local/share/agent-browser}"
+mkdir -p "$PROFILE"
+# browser-logins.sh holds Chrome back while it merges saved sign-ins into the profile.
+while [ -e /tmp/hc-browser-hold ]; do sleep 0.5; done
+# A previous container's lock (restored from a snapshot) would make Chrome hand off and exit.
+rm -f "$PROFILE"/Singleton*
+exec google-chrome-stable \
+  --user-data-dir="$PROFILE" \
+  --remote-debugging-port=9222 \
+  --no-sandbox --test-type \
+  --password-store=basic \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-gpu \
+  --disable-dev-shm-usage \
+  --hide-crash-restore-bubble \
+  --restore-last-session \
+  --lang=en-GB --accept-lang=en-GB,en \
+  --start-maximized \
+  "$@"

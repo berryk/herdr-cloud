@@ -1,0 +1,68 @@
+// Copy to wrangler.jsonc (git-ignored) and fill in the placeholders. See docs/SETUP.md.
+{
+  "name": "herdr-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Served only on a custom hostname behind a Cloudflare Access app. The Worker verifies
+  // Access's signed JWT, then lets in ADMIN_EMAIL and ALLOWED_EMAILS ("@domain" works).
+  "workers_dev": false,
+  "routes": [{ "pattern": "herdr.your-domain.com", "custom_domain": true }],
+  "vars": {
+    // Owner of the deployment: their workspaces keep bare names and they see every workspace's costs.
+    "ADMIN_EMAIL": "you@your-domain.com",
+    // Comma-separated emails or "@domain" entries allowed in besides the admin (Access is the first gate).
+    "ALLOWED_EMAILS": "",
+    // Workspaces each non-admin user may have.
+    "MAX_WORKSPACES": "3",
+    // Your Zero Trust team domain and the Application Audience (AUD) tag of the Access app.
+    "ACCESS_TEAM_DOMAIN": "your-team.cloudflareaccess.com",
+    "ACCESS_AUD": "paste-the-access-app-aud-tag-here",
+    // Optional: client ID of an Access service token agents use to test the deployment ("<id>.access").
+    // It acts as the admin. Leave empty to disable.
+    "SERVICE_CLIENT_ID": "",
+    // Optional: more service tokens that act as ordinary (non-admin) users, "clientId=email,...",
+    // so agents can check what your other users see (tools/hc.sh with that token's credentials).
+    "SERVICE_USERS": "",
+    // Minutes with nothing happening before a workspace snapshots and sleeps.
+    "IDLE_MINUTES": "20",
+    // How often the idle check (and home archive) runs, in minutes.
+    "CHECK_MINUTES": "5",
+    // Cloudflare Containers instance type.
+    "INSTANCE": "standard-2",
+    // Sizes users may choose per workspace (default: standard-1 to standard-4).
+    "ALLOWED_INSTANCES": "standard-1,standard-2,standard-3,standard-4",
+    // Longest a container may run with no requests at all before the platform stops it (hours).
+    "SAFETY_HOURS": "6",
+    // Minutes between home-folder archives to R2 while a workspace is in use.
+    "BACKUP_MINUTES": "30",
+    // Older journal repos kept after a monthly rollover, in months.
+    "JOURNAL_KEEP_MONTHS": "2",
+    // Roll the journal over early once its history passes this many MB (Artifacts caps repos at 1 GB).
+    "JOURNAL_ROLLOVER_MB": "600",
+    // Untracked project files bigger than this many MB are left out of journal snapshots.
+    "JOURNAL_MAX_FILE_MB": "25"
+  },
+  // Secrets (wrangler secret put): SECRETS_KEY (32 random bytes, base64), and optionally the
+  // admin's fallback CLAUDE_CODE_OAUTH_TOKEN and GITHUB_TOKEN.
+  "r2_buckets": [{ "binding": "HOMES", "bucket_name": "herdr-cloud-homes" }],
+  // Workspace journals: git repos in this Artifacts namespace (container/scripts/journal.sh).
+  // Remove this binding to run without a journal.
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "herdr-cloud" }],
+  "durable_objects": {
+    "bindings": [{ "name": "WORKSPACE", "class_name": "Workspace" }]
+  },
+  "containers": [
+    {
+      "class_name": "Workspace",
+      "scheduling_policy": "durable_object",
+      // Must be a digest-pinned image in your account's registry: tools/push-image.sh builds
+      // container/Dockerfile, pushes it and writes the reference here.
+      "images": { "workstation": { "image": "registry.cloudflare.com/<account-id>/herdr-cloud@sha256:<digest>" } }
+    }
+  ],
+  "exports": {
+    "Workspace": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "observability": { "enabled": true }
+}

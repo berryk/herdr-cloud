@@ -1,0 +1,11 @@
+# Linked by init.sh. Reacts to Herdr's agent events inside the workspace.
+id = "herdr-cloud"
+name = "herdr-cloud"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Journal each agent turn to the workspace's Artifacts repo"
+platforms = ["linux"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["/opt/herdr-cloud/agent-event.sh"]
