@@ -19,7 +19,9 @@ export const indexPage = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>herdr-cloud</title>
 <style>body{font:16px system-ui;background:#111;color:#ddd;max-width:560px;margin:10vh auto;padding:0 16px}
-input,button{font:inherit;padding:8px 12px;border-radius:6px;border:1px solid #444;background:#1c1c1c;color:#eee}
+input,button,select{font:inherit;padding:8px 12px;border-radius:6px;border:1px solid #444;background:#1c1c1c;color:#eee}
+#f{display:flex;flex-wrap:wrap;gap:8px}#n{flex:1 1 160px;min-width:0}#nsz{flex:0 1 auto;min-width:0}
+@media (max-width:520px){#n{flex-basis:100%}#nsz{flex:1 1 0}}
 a{color:#8cf}li{margin:6px 0}table{border-collapse:collapse;width:100%}td{padding:6px 8px 6px 0}
 .dim{color:#888;font-size:14px}.st{font-size:14px;color:#888}.st.on{color:#7d7}.where{display:block;font-size:12px;color:#888}
 button.del{font-size:13px;padding:3px 8px;color:#e88;border-color:#533}
@@ -32,7 +34,7 @@ label.opt:has(input:checked){border-color:#5a8}label.opt b{color:#fff}label.opt 
 </style></head>
 <body><h1>herdr-cloud</h1><p><a href="/connect">Connect</a> · <a href="/costs">Costs</a> · <a href="/benchmarks">Benchmarks</a> · <a href="/settings">Secrets and logins</a> <span class="dim" id="me"></span></p>
 <form id="f"><input id="n" placeholder="project name" pattern="[A-Za-z0-9][A-Za-z0-9 _.\\-]{0,62}" autocapitalize="none" autocorrect="off" required autofocus>
-<button>Open</button></form>
+<select id="nsz" title="Size of a new workspace (an existing one keeps its size)" hidden></select><button>Open</button></form>
 <h3>Workspaces</h3><table id="ws"><tbody><tr><td>loading…</td></tr></tbody></table>
 <p class="dim">Open a workspace here, or from a laptop over SSH or Herdr: see <a href="/connect">Connect</a>. Tap a workspace's size to change it.</p>
 <dialog id="sz"><form method="dialog" id="szf"><h3>Size of <span id="szn"></span></h3>
@@ -40,8 +42,13 @@ label.opt:has(input:checked){border-color:#5a8}label.opt b{color:#fff}label.opt 
 <div id="szo"></div><p id="szm" class="dim"></p>
 <div class="row"><button value="cancel" formnovalidate>Cancel</button><button id="szs" value="save">Save</button></div></form></dialog>
 <script>
-const go = n => location.href = "/w/" + n.trim().toLowerCase().replace(/[\\s_.]+/g, "-");
-document.getElementById("f").onsubmit = e => { e.preventDefault(); go(document.getElementById("n").value); };
+// A new workspace's size; the server ignores it when the name already exists.
+const nsz = document.getElementById("nsz");
+document.getElementById("f").onsubmit = e => {
+  e.preventDefault();
+  const n = document.getElementById("n").value.trim().toLowerCase().replace(/[\\s_.]+/g, "-");
+  location.href = "/w/" + n + (nsz.value && !nsz.querySelector("option:checked").dataset.default ? "?size=" + nsz.value : "");
+};
 const ago = t => { if (!t) return "never"; const m = Math.round((Date.now() - t) / 60000);
   return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 2880 ? Math.round(m / 60) + " h ago" : Math.round(m / 1440) + " days ago"; };
 const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -65,7 +72,11 @@ const money = n => "$" + n.toFixed(n < 0.1 ? 3 : 2);
 let SIZES = [];
 const sizeLabel = n => { const z = SIZES.find(x => x.instance === n); return z ? z.vcpu + " vCPU · " + z.memGiB + " GiB" : n; };
 async function load() {
-  if (!SIZES.length) SIZES = await (await fetch("/api/sizes")).json();
+  if (!SIZES.length) {
+    SIZES = await (await fetch("/api/sizes")).json();
+    nsz.innerHTML = SIZES.map(z => '<option value="' + z.instance + '"' + (z.default ? " selected data-default=1" : "") + '>' + z.vcpu + ' vCPU · ' + z.memGiB + ' GiB · ' + money(z.busy) + '/h</option>').join("");
+    nsz.hidden = SIZES.length < 2;
+  }
   const rows = await (await fetch("/api/workspaces")).json();
   document.querySelector("#ws tbody").innerHTML = rows.map(w =>
     '<tr><td><a href="/w/' + w.name + '">' + esc(w.name) + '</a>' + where(w)

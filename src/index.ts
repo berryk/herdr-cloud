@@ -1426,6 +1426,13 @@ export default {
     try {
       if (!action && request.method === "GET") {
         if (await overLimit(env, me, key)) return html(tooManyPage(Number(env.MAX_WORKSPACES) || 3), 403);
+        // The create form's size (?size=standard-3) applies only to a new workspace, so opening an
+        // existing one with it never resizes it; then drop it from the address.
+        const size = url.searchParams.get("size");
+        if (size !== null) {
+          if (!(await env.WORKSPACE.getByName(LEDGER).registry()).some((w) => w.name === key)) await ws.setSize(size);
+          return Response.redirect(`${url.origin}/w/${name}`, 303);
+        }
         return html(terminalPage(name));
       }
       if (!action && request.method === "DELETE") {
