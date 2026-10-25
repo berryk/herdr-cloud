@@ -80,6 +80,7 @@ Browser (xterm.js) ──WSS──> Worker ──> Durable Object "Workspace" (o
   - The Worker verifies Access's signed JWT (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) rather than trusting headers. It lets in `ADMIN_EMAIL`, anyone matching `ALLOWED_EMAILS` (emails or `@domain`), and the agent service token (as the admin).
   - Workspaces are owned by whoever opens them. The admin's keep their bare names; everyone else's Durable Object, R2 archive and ledger rows are keyed `<email>/<name>`, so a user can only reach their own. Non-admins get `MAX_WORKSPACES`.
   - `/costs` shows the admin the whole account; others see only their own workspaces, without the account bill.
+  - `/people` (admin only) lists everyone who has signed in: first and last visit, days active, last SSH connection, workspaces and this month's cost. A visit is a page load or an SSH connection by a person (service tokens are not counted), recorded in the ledger Durable Object. Access's own logs hold the sign-ins and codes sent.
 - **Secrets and logins** (per user, at `/settings`).
   - Each user stores a 1Password service account token and environment variables. Values are literals or `op://` references. They are AES-GCM encrypted under the `SECRETS_KEY` Worker secret in a per-user Durable Object (`_user:<email>`) and never returned to the browser.
   - Herdr starts through `with-secrets.sh`, which resolves `op://` values with one `op run` (per variable if one fails) and drops unresolved ones. Values live only in process memory. The Herdr server keeps the environment it started with, so changes apply on the next wake.
@@ -98,6 +99,7 @@ Browser (xterm.js) ──WSS──> Worker ──> Durable Object "Workspace" (o
 | `GET /settings`, `GET/PUT /api/settings` | Your secrets and logins (values write-only) |
 | `DELETE /api/logins/<claude\|github\|chrome>`, `POST /api/logins/chrome` | Forget a saved login; stop or restart copying Chrome sign-ins |
 | `GET /api/me`, `GET /api/workspaces`, `GET /api/costs` | Who you are; your workspaces; costs |
+| `GET /people`, `GET /api/people` | Admin: who has signed in and how much they use it |
 | `GET /w/:name` | Terminal page (xterm.js) |
 | `GET /w/:name/terminal` (WebSocket) | Attaches `herdr` in a PTY |
 | `GET /w/:name/browser/*` | KasmVNC viewer of the agent browser (pages and RFB WebSocket) |

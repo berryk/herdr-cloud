@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
-import { benchmarksPage, connectPage, costsPage, indexPage, settingsPage, terminalPage, tooManyPage } from "./page.js";
+import { benchmarksPage, connectPage, costsPage, indexPage, peoplePage, settingsPage, terminalPage, tooManyPage } from "./page.js";
 import { INSTANCES, PRICE, SIZES, bill, cost, emptyUsage, hourly, month, type Usage } from "./meter.js";
 import { identify, type AuthEnv, type Identity } from "./auth.js";
 import { SecretsUpdate, applyUpdate, seal, sealBytes, unseal, unsealBytes, view, type Sealed, type Secrets, type SecretsView } from "./secrets.js";
@@ -124,6 +124,19 @@ const browserKey = (email: string) => `_logins/${email}/chrome-cookies.gz.enc`;
 /** A cookie database this big is not one to carry around (bytes, gzipped). */
 const BROWSER_MAX = 32 * 1024 * 1024;
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+
+/** A person who has signed in, as the People page shows them. */
+interface Person {
+  email: string;
+  first: number;
+  last: number;
+  /** Days with at least one visit, and the last of them (UTC). */
+  days: number;
+  lastDay?: string;
+  /** Pages opened and SSH connections. */
+  visits: number;
+  lastSsh?: number;
+}
 
 /** The workspace's current journal repo in Artifacts, and the older ones still kept. */
 interface Journal {
@@ -328,6 +341,19 @@ export class Workspace extends DurableObject<Env> {
   }
 
   // ---- ledger (only on the LEDGER instance) ----
+  /** Someone opened a page or connected over SSH, for the admin's People page (LEDGER only). */
+  async seen(email: string, via: "web" | "ssh"): Promise<void> {
+    const now = Date.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    const p = (await this.ctx.storage.get<Person>(`user:${email}`)) ?? { email, first: now, last: now, days: 0, visits: 0 };
+    if (p.lastDay !== day) p.days++;
+    Object.assign(p, { last: now, lastDay: day, visits: p.visits + 1 }, via === "ssh" ? { lastSsh: now } : {});
+    await this.ctx.storage.put(`user:${email}`, p);
+  }
+  async people(): Promise<Person[]> {
+    return [...(await this.ctx.storage.list<Person>({ prefix: "user:" })).values()];
+  }
+
   async report(name: string, m: string, u: Usage): Promise<void> {
     await this.ctx.storage.put(`ledger:${m}:${name}`, u);
   }
@@ -1195,6 +1221,29 @@ export default {
     const me = await identify(request, env);
     if (!me) return new Response("Forbidden", { status: 403 });
     const url = new URL(request.url);
+    // Page loads and SSH connections, not every request, count as visits.
+    const ssh = url.pathname.startsWith("/ssh/");
+    if (!me.service && request.method === "GET" && (ssh || request.headers.get("Accept")?.includes("text/html"))) {
+      await env.WORKSPACE.getByName(LEDGER).seen(me.email, ssh ? "ssh" : "web").catch((e) => console.error({ event: "seen.failed", error: String(e) }));
+    }
+    if (url.pathname === "/people" && request.method === "GET") return me.admin ? html(peoplePage) : new Response("Not found", { status: 404 });
+    if (url.pathname === "/api/people" && request.method === "GET") {
+      if (!me.admin) return new Response("Not found", { status: 404 });
+      const ledger = env.WORKSPACE.getByName(LEDGER);
+      const [people, registry, usage] = await Promise.all([ledger.people(), ledger.registry(), ledger.ledger()]);
+      const thisMonth = usage[month()] ?? {};
+      return Response.json(
+        people.map((p) => {
+          const mine = (k: string) => ownerOf(env, k) === p.email;
+          return {
+            ...p,
+            admin: p.email === env.ADMIN_EMAIL.toLowerCase(),
+            workspaces: registry.filter((w) => mine(w.name)).length,
+            cost: Object.entries(thisMonth).filter(([k]) => mine(k)).reduce((t, [, u]) => t + cost(u).total, 0),
+          };
+        }),
+      );
+    }
     if (url.pathname === "/" && request.method === "GET") return html(indexPage);
     if (url.pathname === "/costs" && request.method === "GET") return html(costsPage);
     if (url.pathname === "/settings" && request.method === "GET") return html(settingsPage);

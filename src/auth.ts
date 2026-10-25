@@ -20,6 +20,8 @@ export interface AuthEnv {
 export interface Identity {
   email: string;
   admin: boolean;
+  /** Signed in with an Access service token (an agent testing the deployment), not a person. */
+  service?: boolean;
 }
 
 const EMAIL = /^[^\s/@]+@[^\s/@]+$/;
@@ -78,10 +80,10 @@ export async function identify(request: Request, env: AuthEnv): Promise<Identity
   // Service tokens (agents testing the deployment) carry no email; Access puts the token's
   // client ID in common_name instead.
   if (!claims.email) {
-    if (env.SERVICE_CLIENT_ID && claims.common_name === env.SERVICE_CLIENT_ID) return { email: admin, admin: true };
+    if (env.SERVICE_CLIENT_ID && claims.common_name === env.SERVICE_CLIENT_ID) return { email: admin, admin: true, service: true };
     for (const entry of (env.SERVICE_USERS ?? "").split(",")) {
       const [id, email] = entry.trim().split("=");
-      if (id && email && claims.common_name === id && EMAIL.test(email.toLowerCase()) && email.toLowerCase() !== admin) return { email: email.toLowerCase(), admin: false };
+      if (id && email && claims.common_name === id && EMAIL.test(email.toLowerCase()) && email.toLowerCase() !== admin) return { email: email.toLowerCase(), admin: false, service: true };
     }
     return null;
   }

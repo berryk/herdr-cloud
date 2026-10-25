@@ -109,7 +109,10 @@ document.getElementById("ws").onclick = async e => {
   load();
 };
 load();
-fetch("/api/me").then(r => r.json()).then(m => document.getElementById("me").textContent = "· " + m.email);
+fetch("/api/me").then(r => r.json()).then(m => {
+  document.getElementById("me").textContent = "· " + m.email;
+  if (m.admin) document.getElementById("me").insertAdjacentHTML("beforebegin", '· <a href="/people">People</a> ');
+});
 </script></body></html>`;
 
 export const connectPage = `<!doctype html>
@@ -560,5 +563,36 @@ const h = s => (s / 3600).toFixed(1) + " h";
   }
   html += '<small>' + d.notes.join("<br>") + '</small>';
   document.getElementById("out").innerHTML = html;
+})();
+</script></body></html>`;
+
+export const peoplePage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>People · herdr-cloud</title>
+<style>body{font:15px system-ui;background:#111;color:#ddd;max-width:860px;margin:5vh auto;padding:0 16px}
+table{border-collapse:collapse;width:100%;margin:8px 0 20px}th,td{text-align:right;padding:6px 8px;border-bottom:1px solid #2a2a2a;white-space:nowrap}
+th:first-child,td:first-child{text-align:left;white-space:normal;word-break:break-all}th{color:#999;font-weight:500}a{color:#8cf}
+.tiles{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.tile{background:#181818;border:1px solid #2a2a2a;border-radius:8px;padding:10px 16px;flex:1 1 140px}
+.big{font-size:28px;color:#fff}small,.dim{color:#888}.wrap{overflow-x:auto}
+@media (max-width:640px){.hide{display:none}}</style></head>
+<body><p><a href="/">← herdr-cloud</a></p><h1>People</h1>
+<p class="dim">Everyone who has signed in, counted when they open a page or connect over SSH (agents' service tokens are not counted). Sign-ins themselves, including codes sent, are in Cloudflare Zero Trust under Logs → Access.</p>
+<div class="tiles" id="tiles"></div><div class="wrap" id="out">loading…</div>
+<script>
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const ago = t => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 2880 ? Math.round(m / 60) + " h ago" : Math.round(m / 1440) + " days ago"; };
+const day = t => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const usd = n => "$" + n.toFixed(2);
+(async () => {
+  const people = await (await fetch("/api/people")).json();
+  people.sort((a, b) => b.last - a.last);
+  const week = Date.now() - 7 * 86400000, today = new Date().toISOString().slice(0, 10);
+  const tile = (n, label) => '<div class="tile"><div class="big">' + n + '</div><small>' + label + '</small></div>';
+  document.getElementById("tiles").innerHTML = tile(people.length, "signed in so far") + tile(people.filter(p => p.lastDay === today).length, "today")
+    + tile(people.filter(p => p.last > week).length, "in the last 7 days") + tile(people.filter(p => p.workspaces).length, "with a workspace")
+    + tile(usd(people.reduce((t, p) => t + p.cost, 0)), "workspace cost this month");
+  document.getElementById("out").innerHTML = "<table><tr><th>Person</th><th>Last seen</th><th class=hide>First seen</th><th>Days</th><th class=hide>Visits</th><th>Workspaces</th><th>This month</th></tr>"
+    + people.map(p => "<tr><td>" + esc(p.email) + (p.admin ? " <span class=dim>(admin)</span>" : "") + "</td><td>" + ago(p.last) + (p.lastSsh ? " <span class=dim title='Last SSH connection'>· ssh " + ago(p.lastSsh) + "</span>" : "") + "</td><td class=hide>" + day(p.first)
+      + "</td><td>" + p.days + "</td><td class=hide>" + p.visits + "</td><td>" + p.workspaces + "</td><td>" + usd(p.cost) + "</td></tr>").join("") + "</table>";
 })();
 </script></body></html>`;
