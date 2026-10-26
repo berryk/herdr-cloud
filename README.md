@@ -27,6 +27,12 @@ features that are still in beta (container snapshots, Artifacts).
   changes a project is a git commit: Claude state, shell state and history on one branch, a
   snapshot of each project's working tree on another. An unexpected stop loses at most a minute.
   A fresh repo starts each month.
+- **History, fork and share.** Each workspace's History page shows the journal as a timeline per
+  project: every agent turn and command, diffs, the files as they were at any point, and restore
+  of a file or a whole project (undoable; git branches are never touched). "While you were away"
+  sums up agent turns, files changed and commands since you last looked, optionally in Claude's
+  words. Fork a workspace as it was at any point, or share a read-only copy of a project at one
+  point with an expiring clone token. A Storage page shows what each workspace keeps.
 - **Per-user secrets.** Each user stores environment variables (their Claude token, a GitHub
   token) and optionally a 1Password service account token; values can be `op://` references
   resolved inside the workspace. Encrypted at rest, never shown again.

@@ -1,9 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import { benchmarksPage, connectPage, costsPage, indexPage, peoplePage, settingsPage, terminalPage, tooManyPage } from "./page.js";
+import { historyPage, storagePage } from "./historyPage.js";
 import { INSTANCES, PRICE, SIZES, bill, cost, emptyUsage, hourly, month, type Usage } from "./meter.js";
 import { identify, type AuthEnv, type Identity } from "./auth.js";
 import { caPublicLine, signHostKey } from "./sshcert.js";
+import { BRANCH, COMMIT, commitChanges, diffTrees, entry, kindOf, logSince, plain, safePath, text, type Change, type Entry } from "./history.js";
 import { SecretsUpdate, applyUpdate, seal, sealBytes, unseal, unsealBytes, view, type Sealed, type Secrets, type SecretsView } from "./secrets.js";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -85,6 +87,23 @@ interface State {
   browserLocal?: string;
   /** Where Cloudflare placed the container at its last start, and the data centre its traffic leaves from. */
   where?: Where;
+  /** When a client (browser, SSH or Herdr) last connected or left: "while you were away" starts here. */
+  lastSeenAt?: number;
+  /** Read-only copies of a project shared from History (see share()). */
+  shares?: Share[];
+  /** A fork waiting for its first start: lay these journal commits over the copied home archive. */
+  fork?: { repo: string; picks: { branch: string; commit: string }[]; from: string; at: number };
+  forkedFrom?: { from: string; at: number };
+}
+
+/** A project's files at one journal commit, pushed to an Artifacts repo of their own. */
+interface Share {
+  repo: string;
+  remote: string;
+  branch: string;
+  commit: string;
+  created: number;
+  expires: number;
 }
 
 interface Where {
@@ -155,7 +174,8 @@ interface Journal {
   /** Estimated size of its history (journal.sh size), and when that was measured. */
   sizeKB?: number;
   sizeAt?: number;
-  old?: { repo: string; started: number }[];
+  /** Older repos, with the branches they had (unset for repos rolled over before this was kept). */
+  old?: { repo: string; started: number; branches?: string[] }[];
 }
 
 /** R2 multipart parts must be equal-sized (except the last) and at least 5 MiB. */
@@ -537,6 +557,7 @@ export class Workspace extends DurableObject<Env> {
       }
     }
     await this.#journalRestore(name, base);
+    await this.#applyFork(name);
     // Before Herdr and Claude start: bring in logins saved from other workspaces (or after a reset).
     await this.#syncLogins(name);
     await this.#syncBrowser(name, true);
@@ -681,7 +702,7 @@ export class Workspace extends DurableObject<Env> {
         await this.env.ARTIFACTS!.delete(repo).catch(() => false);
         throw new Error(`rollover exit ${r.code}: ${r.err}`);
       }
-      old.push({ repo: j.repo, started: j.started ?? Date.now() });
+      old.push({ repo: j.repo, started: j.started ?? Date.now(), branches: j.branches });
     }
     // A new repo may not be ready for get() at once; its creation hands back a first token.
     const exp = Number(/[?&]expires=(\d+)/.exec(c.token)?.[1]) * 1000;
@@ -749,6 +770,281 @@ export class Workspace extends DurableObject<Env> {
     }
     const { remote, lastPush, started, sizeKB, old } = j;
     return { enabled: true, repo: j.repo, remote, started, lastPush, sizeKB, older: old ?? [], branches };
+  }
+
+  // ---- History: the journal read from Artifacts (src/history.ts), restores, shares and forks ----
+
+  /** This workspace's journal repos, newest first. */
+  #journalRepos(j: Journal | undefined): { repo: string; started: number; branches: string[]; current: boolean }[] {
+    if (!j) return [];
+    const older = [...(j.old ?? [])].reverse().map((o) => ({ repo: o.repo, started: o.started, branches: o.branches ?? j.branches, current: false }));
+    return [{ repo: j.repo, started: j.started ?? 0, branches: j.branches, current: true }, ...older];
+  }
+
+  /** A repo (and branch) of this workspace's journal, or null: callers only reach their own. */
+  async #ownRepo(repo: unknown, branch?: unknown): Promise<{ repo: string; current: boolean } | null> {
+    const r = this.#journalRepos((await this.#state()).journal).find((x) => x.repo === repo);
+    if (!r || !this.env.ARTIFACTS) return null;
+    if (branch !== undefined && (typeof branch !== "string" || !BRANCH.test(branch) || !r.branches.includes(branch))) return null;
+    return r;
+  }
+
+  async historyInfo(): Promise<Record<string, unknown>> {
+    const s = await this.#state();
+    const now = Date.now();
+    return {
+      enabled: !!this.env.ARTIFACTS && !!s.journal,
+      running: this.#c.running,
+      clients: this.#sockets.size,
+      lastSeenAt: s.lastSeenAt,
+      repos: this.#journalRepos(s.journal),
+      shares: (s.shares ?? []).filter((x) => x.expires > now).map(({ repo, branch, commit, created, expires }) => ({ repo, branch, commit, created, expires })),
+      forkedFrom: s.forkedFrom,
+    };
+  }
+
+  async historyLog(repo: string, branch: string, offset = 0, limit = 50): Promise<Entry[] | null> {
+    if (!(await this.#ownRepo(repo, branch))) return null;
+    using r = await this.env.ARTIFACTS!.get(repo);
+    return (await r.log({ ref: branch, offset: Math.max(0, offset), limit: Math.min(Math.max(1, limit), 200) })).map(entry);
+  }
+
+  async historyChanges(repo: string, commit: string): Promise<{ changes: Change[]; more: boolean } | null> {
+    if (!COMMIT.test(commit) || !(await this.#ownRepo(repo))) return null;
+    using r = await this.env.ARTIFACTS!.get(repo);
+    return await commitChanges(r, commit);
+  }
+
+  /** A file's bytes by blob hash (what the diff view compares), up to 4 MB. */
+  async historyBlob(repo: string, hash: string): Promise<{ size: number; data?: ArrayBuffer } | null> {
+    if (!COMMIT.test(hash) || !(await this.#ownRepo(repo))) return null;
+    using r = await this.env.ARTIFACTS!.get(repo);
+    const b = await r.readBlob(hash).catch(() => null);
+    if (!b) return null;
+    return b.size > 4 * 1024 * 1024 ? { size: b.size } : { size: b.size, data: await b.arrayBuffer() };
+  }
+
+  /** A folder at a commit, for browsing the files as they were. */
+  async historyTree(repo: string, commit: string, path: string): Promise<{ name: string; type: string; hash: string }[] | null> {
+    if (!COMMIT.test(commit) || (path !== "" && !safePath(path)) || !(await this.#ownRepo(repo))) return null;
+    using r = await this.env.ARTIFACTS!.get(repo);
+    let tree = (await r.readCommit(commit))?.treeHash;
+    for (const part of path ? path.split("/") : []) {
+      tree = (await r.readTree(tree!))?.find((e) => e.name === part && e.type === "tree")?.hash;
+      if (!tree) return null;
+    }
+    const entries = tree ? await r.readTree(tree) : null;
+    return entries?.map(({ name, type, hash }) => ({ name, type, hash })).sort((a, b) => Number(b.type === "tree") - Number(a.type === "tree") || a.name.localeCompare(b.name)) ?? null;
+  }
+
+  /** What happened since `since` (default: when someone last looked): per project the agent turns
+   *  and the files changed, the commands run, and the shell panes' screens now. `brief` only counts. */
+  async away(since?: number, brief = false): Promise<Record<string, unknown>> {
+    const s = await this.#state();
+    const from = since ?? s.lastSeenAt ?? Date.now() - 86400_000;
+    const j = s.journal;
+    const base = { since: from, now: Date.now(), running: this.#c.running, watching: this.#sockets.size > 0, lastPush: j?.lastPush };
+    if (!this.env.ARTIFACTS || !j) return { ...base, projects: [], turns: 0, files: 0 };
+    using r = await this.env.ARTIFACTS.get(j.repo);
+    const projects: Record<string, unknown>[] = [];
+    let turns = 0;
+    let files = 0;
+    for (const branch of j.branches.filter((b) => b.startsWith("work/"))) {
+      const log = await r.log({ ref: branch, limit: 200 });
+      const newer = log.filter((c) => c.committedAt * 1000 > from);
+      if (!newer.length) continue;
+      const agent = newer.filter((c) => kindOf(c.message.trim()) === "agent").map(entry);
+      turns += agent.length;
+      if (brief) {
+        projects.push({ branch, commits: newer.length, turns: agent.length });
+        continue;
+      }
+      const oldest = newer[newer.length - 1];
+      const before = oldest.parents[0] ? await r.readCommit(oldest.parents[0]) : null;
+      const d = await diffTrees(r, before?.treeHash, newer[0].treeHash, 200);
+      files += d.changes.length;
+      projects.push({
+        branch,
+        commits: newer.length,
+        turns: agent.length,
+        agentTurns: agent.slice(0, 15),
+        commands: newer.filter((c) => kindOf(c.message.trim()) === "shell").length,
+        from: before?.hash,
+        to: newer[0].hash,
+        changes: d.changes,
+        more: d.more,
+      });
+    }
+    if (brief) return { ...base, projects, turns };
+    const commands = logSince(await text(r, "home", ".herdr-cloud/commands.log"), from, 40).map((l) => {
+      const [at, pane, code, secs, cwd, ...cmd] = l.split("\t");
+      return { at, pane, code: Number(code), secs, cwd: cwd?.replace(`${HOME}/`, "~/"), cmd: cmd.join("\t") };
+    });
+    const agents = logSince(await text(r, "home", ".herdr-cloud/agent-events.log"), from, 40);
+    // Shell panes' screens as last saved (agents' panes are not saved: Claude redraws its own).
+    const screens: { pane: string; text: string }[] = [];
+    const head = (await r.log({ ref: "home", limit: 1 }))[0];
+    let tree: string | undefined = head?.treeHash;
+    for (const part of [".herdr-cloud", "shells"]) tree = tree ? (await r.readTree(tree))?.find((e) => e.name === part)?.hash : undefined;
+    for (const pane of tree ? ((await r.readTree(tree)) ?? []).filter((e) => e.type === "tree").slice(0, 8) : []) {
+      const screen = (await r.readTree(pane.hash))?.find((e) => e.name === "screen");
+      const blob = screen ? await r.readBlob(screen.hash) : null;
+      const lines = plain((await blob?.text()) ?? "").replace(/\s+$/, "").split("\n");
+      if (lines.join("").trim()) screens.push({ pane: pane.name, text: lines.slice(-30).join("\n") });
+    }
+    return { ...base, projects, turns, files, commands, agents, screens };
+  }
+
+  /** Run journal.sh in the container with extra environment (remotes and tokens for this exec only). */
+  async #journalCmd(args: string[], env: Record<string, string>): Promise<{ code: number; out: string; err: string }> {
+    const p = await this.#c.exec(["/opt/herdr-cloud/journal.sh", ...args], { user: "dev", cwd: HOME, env: { ...this.#procEnv(), ...env } });
+    const o = await p.output();
+    const dec = new TextDecoder();
+    return { code: o.exitCode, out: dec.decode(o.stdout), err: dec.decode(o.stderr).slice(-500) };
+  }
+
+  /** A remote and a short-lived token for reading one of this workspace's journal repos. */
+  async #pickAuth(repo: string): Promise<{ PICK_REMOTE: string; PICK_TOKEN: string }> {
+    const j = (await this.#state()).journal!;
+    if (repo === j.repo) return { PICK_REMOTE: j.remote, PICK_TOKEN: await this.#journalToken(j) };
+    using r = await this.env.ARTIFACTS!.get(repo);
+    return { PICK_REMOTE: (await r.info()).remote, PICK_TOKEN: (await r.createToken("read", 900)).plaintext };
+  }
+
+  static readonly #OLD_IMAGE = "this workspace still runs an older image: press Sleep now, open it again, then retry";
+
+  /** Bring a file (path) or a whole project back to a journal commit. Wakes the workspace. A
+   *  snapshot is taken first, so the restore shows in History and can itself be undone. */
+  async restore(repo: string, branch: string, commit: string, path?: string): Promise<{ ok: boolean; error?: string }> {
+    if (!COMMIT.test(commit) || (path !== undefined && !safePath(path)) || !(await this.#ownRepo(repo, branch))) return { ok: false, error: "not found" };
+    // The whole home folder is never put back at once: it holds every conversation and login.
+    if (branch === "home" && !path) return { ok: false, error: "restore single files from home" };
+    const s = await this.#state();
+    if (!s.name) return { ok: false, error: "not started yet" };
+    await this.#ensureRunning(s.name);
+    const r = await this.#journalCmd(["pick", branch, commit, ...(path ? [path] : [])], await this.#pickAuth(repo));
+    if (r.code !== 0) return { ok: false, error: r.err.includes("usage:") ? Workspace.#OLD_IMAGE : r.err.trim() || `exit ${r.code}` };
+    await this.#journal(s.name);
+    console.log({ event: "history.restore", workspace: s.name, branch, commit, path });
+    return { ok: true };
+  }
+
+  /** Ask Claude, inside the workspace, for a few lines on what happened. Wakes it. */
+  async summarise(since?: number): Promise<{ ok: boolean; summary?: string; error?: string }> {
+    const s = await this.#state();
+    if (!s.name) return { ok: false, error: "not started yet" };
+    const a = (await this.away(since)) as { since: number; projects: { branch: string; agentTurns: Entry[]; changes: Change[]; more: boolean }[]; commands?: { cmd: string; code: number }[] };
+    if (!a.projects.length && !a.commands?.length) return { ok: true, summary: "Nothing changed in this period." };
+    const lines = [`Activity in a development workspace since ${new Date(a.since).toISOString()}.`];
+    for (const p of a.projects) {
+      lines.push(`\nProject ${p.branch.slice(5)}:`, ...p.agentTurns.map((t) => `- agent turn: ${t.message.split("\n")[0]}`));
+      lines.push(`Files changed (${p.changes.length}${p.more ? "+" : ""}): ${p.changes.slice(0, 80).map((c) => `${c.status} ${c.path}`).join(", ")}`);
+    }
+    if (a.commands?.length) lines.push("\nShell commands:", ...a.commands.map((c) => `- ${c.cmd} (exit ${c.code})`));
+    await this.#ensureRunning(s.name);
+    const ask = "In three short bullet points, summarise what was done in this workspace, for its owner coming back to it. Plain text, no preamble.";
+    const body = new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(lines.join("\n").slice(0, 60_000))), c.close()) });
+    const p = await this.#c.exec(["sh", "-c", 'cd /tmp && exec timeout 150 /opt/herdr-cloud/with-secrets.sh claude -p "$1"', "sh", ask], { user: "dev", cwd: "/tmp", env: await this.#secretEnv(s.name), stdin: body });
+    const o = await p.output();
+    const out = new TextDecoder().decode(o.stdout).trim();
+    if (o.exitCode !== 0 || !out) return { ok: false, error: new TextDecoder().decode(o.stderr).slice(-300).trim() || out || `claude exited ${o.exitCode}` };
+    return { ok: true, summary: out };
+  }
+
+  /** Push a project's files at one commit (no history, nothing from home) to a repo of their own,
+   *  readable with a token that expires after `days`. Wakes the workspace. */
+  async share(repo: string, branch: string, commit: string, days: number): Promise<{ ok: boolean; error?: string; remote?: string; token?: string; expires?: number }> {
+    if (!branch.startsWith("work/") || !COMMIT.test(commit) || !(await this.#ownRepo(repo, branch))) return { ok: false, error: "not found" };
+    const s = await this.#state();
+    if (!s.name) return { ok: false, error: "not started yet" };
+    const ttl = Math.round(Math.min(Math.max(days, 1 / 24), 30) * 86400);
+    await this.#ensureRunning(s.name);
+    const name = `share-${slug(shortName(s.name)).slice(0, 30)}-${crypto.randomUUID().slice(0, 8)}`;
+    const c = await this.env.ARTIFACTS!.create(name, { description: `Shared from herdr-cloud: ${shortName(s.name)} ${branch.slice(5)}`, setDefaultBranch: "main" });
+    const r = await this.#journalCmd(["share", branch, commit], { ...(await this.#pickAuth(repo)), SHARE_REMOTE: c.remote, SHARE_TOKEN: c.token });
+    if (r.code !== 0) {
+      await this.env.ARTIFACTS!.delete(name).catch(() => false);
+      return { ok: false, error: r.err.includes("usage:") ? Workspace.#OLD_IMAGE : r.err.trim() || `exit ${r.code}` };
+    }
+    using sr = await this.env.ARTIFACTS!.get(name);
+    const t = await sr.createToken("read", ttl);
+    await sr.revokeToken(c.token).catch(() => false);
+    const expires = Date.parse(t.expiresAt) || Date.now() + ttl * 1000;
+    await this.#save({ shares: [...(s.shares ?? []), { repo: name, remote: c.remote, branch, commit, created: Date.now(), expires }] });
+    console.log({ event: "history.share", workspace: s.name, branch, commit, repo: name, days });
+    return { ok: true, remote: c.remote, token: t.plaintext, expires };
+  }
+
+  /** Delete a share (its repo and token), and any that have expired. */
+  async unshare(repo: string): Promise<boolean> {
+    const s = await this.#state();
+    const now = Date.now();
+    const gone = (s.shares ?? []).filter((x) => x.repo === repo || x.expires <= now);
+    for (const x of gone) await this.env.ARTIFACTS?.delete(x.repo).catch(() => false);
+    await this.#save({ shares: (s.shares ?? []).filter((x) => !gone.includes(x)) });
+    return gone.some((x) => x.repo === repo);
+  }
+
+  /** What a fork at `at` copies: the latest home archive, and per branch the last journal commit
+   *  at or before `at`, laid over it at the fork's first start. */
+  async forkPlan(at: number): Promise<{ ok: boolean; error?: string; homeBackup?: State["homeBackup"]; instance?: string; repo?: string; picks?: { branch: string; commit: string }[] }> {
+    const s = await this.#state();
+    if (!s.homeBackup) return { ok: false, error: "this workspace has no home archive yet (it makes one within half an hour of use, and when it sleeps)" };
+    const repos = this.#journalRepos(s.journal);
+    const src = repos.find((x) => x.started <= at) ?? repos[repos.length - 1];
+    const picks: { branch: string; commit: string }[] = [];
+    if (src && this.env.ARTIFACTS) {
+      using r = await this.env.ARTIFACTS.get(src.repo);
+      for (const branch of src.branches) {
+        const c = (await r.log({ ref: branch, limit: 1000 })).find((x) => x.committedAt * 1000 <= at);
+        if (c) picks.push({ branch, commit: c.hash });
+      }
+    }
+    return { ok: true, homeBackup: s.homeBackup, instance: sizeOf(this.env, s), repo: src?.repo, picks };
+  }
+
+  /** Set up a new workspace as a fork (its home archive already copied to homeKey). */
+  async forkInit(name: string, homeBackup: NonNullable<State["homeBackup"]>, instance: string, fork: NonNullable<State["fork"]>): Promise<boolean> {
+    if ((await this.#state()).name) return false;
+    await this.#save({ name, homeBackup, instance, fork });
+    return true;
+  }
+
+  /** A fork's first start: lay the source's journal at the fork point over the copied home. */
+  async #applyFork(name: string): Promise<void> {
+    const f = (await this.#state()).fork;
+    if (!f) return;
+    if (f.repo && f.picks.length && this.env.ARTIFACTS) try {
+      using r = await this.env.ARTIFACTS.get(f.repo);
+      const auth = { PICK_REMOTE: (await r.info()).remote, PICK_TOKEN: (await r.createToken("read", 900)).plaintext };
+      for (const p of f.picks) {
+        const out = await this.#journalCmd(["pick", p.branch, p.commit], auth);
+        if (out.code !== 0) console.error({ event: "fork.pick.failed", workspace: name, branch: p.branch, error: out.err });
+      }
+    } catch (e) {
+      console.error({ event: "fork.failed", workspace: name, error: String(e) });
+    }
+    await this.#journalCmd(["forget-pushed"], {}).catch(() => null);
+    await this.#save({ fork: undefined, forkedFrom: { from: f.from, at: f.at } });
+    console.log({ event: "fork.applied", workspace: name, from: f.from, at: f.at, picks: f.picks.length });
+  }
+
+  /** What this workspace keeps in R2 and Artifacts, for the Storage page. */
+  async storage(): Promise<Record<string, unknown>> {
+    const s = await this.#state();
+    const j = s.journal;
+    return {
+      running: this.#c.running,
+      home: s.homeBackup && { key: s.homeBackup.key, size: s.homeBackup.size, at: s.homeBackup.at },
+      snapshot: s.lastCheckpoint && { size: s.lastCheckpoint.size, at: s.lastCheckpoint.at },
+      journal: j && { repo: j.repo, sizeKB: j.sizeKB, lastPush: j.lastPush, started: j.started, older: (j.old ?? []).length },
+      shares: (s.shares ?? []).filter((x) => x.expires > Date.now()).length,
+      repos: [...this.#journalRepos(j).map((x) => x.repo), ...(s.shares ?? []).map((x) => x.repo)],
+    };
+  }
+
+  async #seen(): Promise<void> {
+    await this.#save({ lastSeenAt: Date.now() });
   }
 
   /** Logins made inside a workspace (claude /login, gh auth login) follow their owner. Each minute
@@ -966,6 +1262,7 @@ export class Workspace extends DurableObject<Env> {
     if (s.journal && this.env.ARTIFACTS) {
       for (const repo of [s.journal.repo, ...(s.journal.old ?? []).map((o) => o.repo)]) await this.env.ARTIFACTS.delete(repo).catch(() => false);
     }
+    for (const x of s.shares ?? []) await this.env.ARTIFACTS?.delete(x.repo).catch(() => false);
     await this.ctx.storage.delete("state"); // keep usage history
   }
 
@@ -1011,6 +1308,7 @@ export class Workspace extends DurableObject<Env> {
     server.accept();
     this.#sockets.add(server);
     await this.#touch();
+    await this.#seen();
     this.#bridge(server, proc, abort);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1097,7 +1395,10 @@ export class Workspace extends DurableObject<Env> {
     server.accept();
     this.#sockets.add(server);
     const writer = sock.writable.getWriter();
+    let gone = false;
     const close = (why: string) => {
+      if (!gone) void this.#seen();
+      gone = true;
       this.#sockets.delete(server);
       writer.close().catch(() => {});
       sock.close().catch(() => {});
@@ -1119,6 +1420,7 @@ export class Workspace extends DurableObject<Env> {
         .catch(() => {})
         .finally(() => close("ssh closed")),
     );
+    await this.#seen();
     console.log({ event: "ssh.open", workspace: name });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1195,6 +1497,7 @@ export class Workspace extends DurableObject<Env> {
       closed = true;
       this.#sockets.delete(server);
       void this.#touch();
+      void this.#seen();
       if (!exited) abort.abort(); // kills this herdr client only; the herdr server keeps running
     };
     let lastTouch = 0;
@@ -1258,6 +1561,126 @@ async function overLimit(env: Env, me: Identity, key: string): Promise<boolean> 
   return !mine.some((w) => w.name === key) && mine.length >= (Number(env.MAX_WORKSPACES) || 3);
 }
 
+/** /w/<name>/j/<op>: the History page's reads and actions, on the caller's own workspace. */
+async function history(env: Env, me: Identity, request: Request, url: URL, name: string, op: string): Promise<Response> {
+  if (!NAME.test(name)) return new Response("bad workspace name", { status: 400 });
+  const ws = env.WORKSPACE.getByName(workspaceKey(env, me.email, name));
+  const q = (k: string) => url.searchParams.get(k) ?? "";
+  const json = (v: unknown) => (v === null ? Response.json({ error: "not found" }, { status: 404 }) : Response.json(v));
+  const body = async () => (await request.json<Record<string, unknown>>().catch(() => ({}))) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  try {
+    if (request.method === "GET") {
+      if (op === "info") return json(await ws.historyInfo());
+      if (op === "log") return json(await ws.historyLog(q("repo"), q("branch"), Number(q("offset")) || 0, Number(q("limit")) || 50));
+      if (op === "changes") return json(await ws.historyChanges(q("repo"), q("commit")));
+      if (op === "tree") return json(await ws.historyTree(q("repo"), q("commit"), q("path")));
+      if (op === "away") return json(await ws.away(Number(q("since")) || undefined, q("brief") === "1"));
+      if (op === "blob") {
+        const b = await ws.historyBlob(q("repo"), q("hash"));
+        if (!b) return new Response("not found", { status: 404 });
+        if (!b.data) return new Response(`too big to show (${b.size} bytes)`, { status: 413 });
+        // Workspace content: never let a browser render it as a page of ours.
+        return new Response(b.data, {
+          headers: { "Content-Type": "application/octet-stream", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Content-Disposition": "attachment", "Cache-Control": "private, max-age=86400" },
+        });
+      }
+    }
+    if (request.method === "POST") {
+      const b = await body();
+      if (op === "restore") return Response.json(await ws.restore(str(b.repo), str(b.branch), str(b.commit), b.path === undefined ? undefined : str(b.path)));
+      if (op === "summary") return Response.json(await ws.summarise(typeof b.since === "number" ? b.since : undefined));
+      if (op === "share") return Response.json(await ws.share(str(b.repo), str(b.branch), str(b.commit), typeof b.days === "number" ? b.days : 7));
+    }
+    if (request.method === "DELETE" && op === "share") return Response.json({ ok: await ws.unshare(q("repo")) });
+    return new Response("Not found", { status: 404 });
+  } catch (e) {
+    console.error({ event: "history.failed", name, op, error: e instanceof Error ? e.stack : String(e) });
+    return Response.json({ ok: false, error: "history unavailable" }, { status: 500 });
+  }
+}
+
+/** POST /w/<name>/fork {to, at}: a new workspace from this one's home archive, with its journal
+ *  as it stood at `at` laid over it when the new one first starts. */
+async function fork(env: Env, me: Identity, request: Request, name: string, key: string): Promise<Response> {
+  const b = await request.json<{ to?: unknown; at?: unknown }>().catch(() => ({}) as { to?: unknown; at?: unknown });
+  const to = typeof b.to === "string" ? canonical(b.to) : "";
+  if (!NAME.test(to)) return Response.json({ ok: false, error: "name the new workspace with letters, digits and hyphens" }, { status: 400 });
+  const dst = workspaceKey(env, me.email, to);
+  const ledger = env.WORKSPACE.getByName(LEDGER);
+  if ((await ledger.registry()).some((w) => w.name === dst)) return Response.json({ ok: false, error: `${to} already exists` }, { status: 409 });
+  if (await overLimit(env, me, dst)) return Response.json({ ok: false, error: "workspace limit reached" }, { status: 403 });
+  const at = typeof b.at === "number" && b.at > 0 ? Math.min(b.at, Date.now()) : Date.now();
+  const plan = await env.WORKSPACE.getByName(key).forkPlan(at);
+  if (!plan.ok || !plan.homeBackup) return Response.json({ ok: false, error: plan.error }, { status: 400 });
+  const obj = await env.HOMES.get(plan.homeBackup.key);
+  if (!obj) return Response.json({ ok: false, error: "home archive missing" }, { status: 500 });
+  const homeKey = `${dst}/home.tar.gz`;
+  const { readable, writable } = new FixedLengthStream(obj.size);
+  const put = env.HOMES.put(homeKey, readable, { httpMetadata: { contentType: "application/gzip" } });
+  await obj.body.pipeTo(writable);
+  await put;
+  const ok = await env.WORKSPACE.getByName(dst).forkInit(dst, { key: homeKey, at: plan.homeBackup.at, size: obj.size }, plan.instance!, {
+    repo: plan.repo ?? "",
+    picks: plan.picks ?? [],
+    from: name,
+    at,
+  });
+  if (!ok) return Response.json({ ok: false, error: `${to} already exists` }, { status: 409 });
+  await ledger.register(dst);
+  console.log({ event: "fork", from: key, to: dst, at, picks: plan.picks?.length ?? 0, bytes: obj.size });
+  return Response.json({ ok: true, name: to });
+}
+
+/** What is stored for the caller's workspaces (and, for the admin, the whole R2 bucket and
+ *  Artifacts namespace, with anything nothing refers to any more). */
+async function storageReport(env: Env, me: Identity): Promise<{ workspaces: unknown[]; chrome: unknown; everyone?: unknown[]; orphans?: { objects: { key: string; size: number; uploaded: string }[]; repos: { name: string; createdAt: string; lastPushAt: string | null }[] } }> {
+  const registry = await env.WORKSPACE.getByName(LEDGER).registry();
+  const listed = me.admin ? registry : registry.filter((w) => ownerOf(env, w.name) === me.email);
+  const rows = await Promise.all(
+    listed.map(async (w) => {
+      let st: { repos?: string[]; home?: { key: string } } = {};
+      try {
+        st = (await env.WORKSPACE.getByName(w.name).storage()) as typeof st;
+      } catch (e) {
+        console.error({ event: "storage.failed", workspace: w.name, error: String(e) });
+      }
+      return { key: w.name, owner: ownerOf(env, w.name), name: shortName(w.name), ...st };
+    }),
+  );
+  const b = await env.WORKSPACE.getByName(userKey(me.email)).browserSaved();
+  const out: Awaited<ReturnType<typeof storageReport>> = {
+    workspaces: rows.filter((r) => r.owner === me.email).map(({ repos, ...r }) => r),
+    chrome: b?.hash ? { size: b.size, at: b.at } : null,
+  };
+  if (!me.admin) return out;
+  const objects: { key: string; size: number; uploaded: string }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.HOMES.list({ cursor, limit: 1000 });
+    objects.push(...page.objects.map((o) => ({ key: o.key, size: o.size, uploaded: o.uploaded.toISOString() })));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor && objects.length < 10_000);
+  const repos: { name: string; createdAt: string; lastPushAt: string | null }[] = [];
+  let rc: string | undefined;
+  if (env.ARTIFACTS) {
+    do {
+      const page = await env.ARTIFACTS.list({ cursor: rc, limit: 200 });
+      repos.push(...page.repos.map((r) => ({ name: r.name, createdAt: r.createdAt, lastPushAt: r.lastPushAt })));
+      rc = page.cursor;
+    } while (rc && repos.length < 5_000);
+  }
+  const usedKeys = new Set(rows.map((r) => r.home?.key).filter(Boolean));
+  const usedRepos = new Set(rows.flatMap((r) => r.repos ?? []));
+  out.everyone = rows.map(({ repos, ...r }) => r);
+  out.orphans = {
+    // Saved sign-ins (_logins/) belong to people, not workspaces.
+    objects: objects.filter((o) => !usedKeys.has(o.key) && !o.key.startsWith("_logins/")),
+    repos: repos.filter((r) => !usedRepos.has(r.name)),
+  };
+  return out;
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const me = await identify(request, env);
@@ -1290,6 +1713,21 @@ export default {
       );
     }
     if (url.pathname === "/" && request.method === "GET") return html(indexPage);
+    if (url.pathname === "/storage" && request.method === "GET") return html(storagePage);
+    if (url.pathname === "/api/storage" && request.method === "GET") return Response.json(await storageReport(env, me));
+    const del = /^\/api\/storage\/(object|repo)$/.exec(url.pathname);
+    if (del && request.method === "DELETE") {
+      // The admin removes leftovers: only what no workspace, share or saved sign-in refers to.
+      if (!me.admin) return new Response("Not found", { status: 404 });
+      const id = url.searchParams.get(del[1] === "object" ? "key" : "name") ?? "";
+      const report = await storageReport(env, me);
+      const orphan = (del[1] === "object" ? report.orphans?.objects : report.orphans?.repos)?.some((o: { key?: string; name?: string }) => (o.key ?? o.name) === id);
+      if (!orphan) return Response.json({ ok: false, error: "in use, or not found" }, { status: 409 });
+      if (del[1] === "object") await env.HOMES.delete(id);
+      else await env.ARTIFACTS?.delete(id);
+      console.log({ event: "storage.deleted", kind: del[1], id, by: me.email });
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/costs" && request.method === "GET") return html(costsPage);
     if (url.pathname === "/settings" && request.method === "GET") return html(settingsPage);
     if (url.pathname === "/connect" && request.method === "GET") return html(connectPage);
@@ -1414,7 +1852,9 @@ export default {
         return new Response("workspace error", { status: 500 });
       }
     }
-    const m = /^\/w\/([^/]+)(?:\/(terminal|status|checkpoint|journal|size))?$/.exec(url.pathname);
+    const hj = /^\/w\/([^/]+)\/j\/([a-z]+)$/.exec(url.pathname);
+    if (hj) return history(env, me, request, url, canonical(hj[1]), hj[2]);
+    const m = /^\/w\/([^/]+)(?:\/(terminal|status|checkpoint|journal|size|history|fork))?$/.exec(url.pathname);
     if (!m) return new Response("Not found", { status: 404 });
     const [, raw, action] = m;
     const name = canonical(raw);
@@ -1446,6 +1886,8 @@ export default {
         return await ws.fetch(new Request(url, request));
       }
       if (action === "status" && request.method === "GET") return Response.json(await ws.status());
+      if (action === "history" && request.method === "GET") return html(historyPage(name));
+      if (action === "fork" && request.method === "POST") return await fork(env, me, request, name, key);
       if (action === "journal" && request.method === "GET") return Response.json(await ws.journalLog());
       if (action === "size" && request.method === "POST") {
         const body = await request.json<{ instance?: unknown }>().catch(() => ({ instance: undefined }));

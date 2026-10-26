@@ -25,6 +25,7 @@ input,button,select{font:inherit;padding:8px 12px;border-radius:6px;border:1px s
 a{color:#8cf}li{margin:6px 0}table{border-collapse:collapse;width:100%}td{padding:6px 8px 6px 0}
 .dim{color:#888;font-size:14px}.st{font-size:14px;color:#888}.st.on{color:#7d7}.where{display:block;font-size:12px;color:#888}
 button.del{font-size:13px;padding:3px 8px;color:#e88;border-color:#533}
+a.hist{font-size:12px;color:#8cf;margin-left:6px}.away{display:block;font-size:12px}.away a{color:#9e9}
 button.size{font-size:12px;padding:1px 6px;margin-top:2px;white-space:nowrap;color:#aaa;border-color:#333;background:none}
 dialog{background:#181818;color:#ddd;border:1px solid #333;border-radius:10px;max-width:520px;width:calc(100% - 32px);padding:16px}
 dialog::backdrop{background:#000a}dialog h3{margin:0 0 4px}
@@ -32,7 +33,7 @@ label.opt{display:flex;gap:10px;padding:10px;border:1px solid #2a2a2a;border-rad
 label.opt:has(input:checked){border-color:#5a8}label.opt b{color:#fff}label.opt small{color:#999;display:block}
 .row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 </style></head>
-<body><h1>herdr-cloud</h1><p><a href="/connect">Connect</a> · <a href="/costs">Costs</a> · <a href="/benchmarks">Benchmarks</a> · <a href="/settings">Secrets and logins</a> <span class="dim" id="me"></span></p>
+<body><h1>herdr-cloud</h1><p><a href="/connect">Connect</a> · <a href="/costs">Costs</a> · <a href="/storage">Storage</a> · <a href="/benchmarks">Benchmarks</a> · <a href="/settings">Secrets and logins</a> <span class="dim" id="me"></span></p>
 <form id="f"><input id="n" placeholder="project name" pattern="[A-Za-z0-9][A-Za-z0-9 _.\\-]{0,62}" autocapitalize="none" autocorrect="off" required autofocus>
 <select id="nsz" title="Size of a new workspace (an existing one keeps its size)" hidden></select><button>Open</button></form>
 <h3>Workspaces</h3><table id="ws"><tbody><tr><td>loading…</td></tr></tbody></table>
@@ -79,13 +80,21 @@ async function load() {
   }
   const rows = await (await fetch("/api/workspaces")).json();
   document.querySelector("#ws tbody").innerHTML = rows.map(w =>
-    '<tr><td><a href="/w/' + w.name + '">' + esc(w.name) + '</a>' + where(w)
+    '<tr><td><a href="/w/' + w.name + '">' + esc(w.name) + '</a> <a class="hist" href="/w/' + w.name + '/history" title="What changed, diffs and restores">history</a>' + where(w)
+    + '<span class="away" data-away="' + w.name + '"></span>'
     + '<button class="size" data-size="' + w.name + '" data-cur="' + w.size + '" title="Change size">'
     + esc(sizeLabel(w.size)) + (w.runningSize && w.runningSize !== w.size ? " (after restart)" : "") + '</button></td>'
     + '<td class="st ' + (w.running ? "on" : "") + '">' + (w.running ? "running" : "asleep") + '</td>'
     + '<td class="dim">used ' + ago(w.lastActivity) + '</td>'
     + '<td><button class="del" data-n="' + w.name + '" title="Delete this workspace">Delete</button></td></tr>').join("")
     || "<tr><td>none yet</td></tr>";
+  // What agents did since you last looked, from each workspace's history.
+  for (const w of rows) fetch("/w/" + w.name + "/j/away?brief=1").then(r => r.ok ? r.json() : null).then(a => {
+    const box = document.querySelector('[data-away="' + w.name + '"]');
+    if (!a || !box || a.watching || !a.projects.length) return;
+    const n = a.projects.length;
+    box.innerHTML = '<a href="/w/' + w.name + '/history">' + (a.turns ? a.turns + " agent turn" + (a.turns === 1 ? "" : "s") : "changes") + " in " + n + " project" + (n === 1 ? "" : "s") + " since you looked</a>";
+  }).catch(() => {});
 }
 // The size picker: one option per allowed size, with what it suits and what it costs.
 let sizeFor = null;
@@ -407,7 +416,7 @@ export const terminalPage = (name: string) => `<!doctype html>
 body.phone #kb,body.kb-show #kb{display:block}
 body.kb-hide #kb{display:none}
 @media (max-width:640px){#cost,#costs{display:none}}[hidden]{display:none!important}</style></head>
-<body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><span style="flex:1"></span>
+<body><div id="bar"><a href="/" style="color:#8cf" title="All workspaces">← workspaces</a><b>${name}</b><span id="st">connecting…</span><span id="cost"></span><a id="costs" href="/costs" style="color:#8cf">costs</a><a href="/w/${name}/browser/" target="_blank" style="color:#8cf" title="The Chrome that agents drive, live">browser</a><a href="/w/${name}/history" target="_blank" style="color:#8cf" title="What changed, diffs and restores">history</a><span style="flex:1"></span>
 <button id="kbtoggle" title="Show or hide the phone key bar">keys</button><button id="copy" hidden title="The browser blocked copying Herdr's selection: tap to copy it">Copy</button><button id="cp" title="Snapshot now and stop the container">Sleep now</button></div><div id="t"></div>
 <div id="kb"><div id="pad"></div><div id="keys"></div></div>
 <script type="module">

@@ -18,6 +18,16 @@
 #   journal.sh restore           after waking from an older copy (an unannounced stop): lay the
 #                                newer pushed state over the home folder and the projects; needs
 #                                JOURNAL_REMOTE and JOURNAL_TOKEN.
+#   journal.sh pick BRANCH COMMIT [PATH]
+#                                bring one file (PATH), or the whole project or home folder, back to
+#                                how COMMIT on BRANCH of PICK_REMOTE (token PICK_TOKEN) had it. Takes
+#                                a snapshot first, so a pick can itself be undone; git branches,
+#                                commits and the index are never touched. Prints "picked BRANCH".
+#   journal.sh forget-pushed     a fork's first journal: push everything, not only what changed
+#                                since the workspace it was copied from last pushed
+#   journal.sh share BRANCH COMMIT
+#                                push the project's files at COMMIT (one commit, no history) to
+#                                SHARE_REMOTE as main, fetching COMMIT from PICK_REMOTE.
 set -u
 HOME=${HOME:-/home/dev}
 J=$HOME/.herdr-cloud/journal.git
@@ -169,8 +179,89 @@ restore() {
   exit 0
 }
 
+# The project directory a journal branch is for; a project the journal has but this disk lacks
+# (a fork from a home archive older than the project) is created as a new repo.
+top_for() {
+  [ -s "$REPOS" ] && while read -r tf; do
+    [ "$(branch_for "$tf")" = "$1" ] && { echo "$tf"; return 0; }
+  done < "$REPOS"
+  tf=$HOME/work/${1#work/}
+  [ -d "$tf" ] || { mkdir -p "$tf" && git -C "$tf" init -q; } || return 1
+  [ -e "$tf/.git" ] || return 1
+  echo "$tf" >> "$REPOS"
+  echo "$tf"
+}
+
+# Fetch BRANCH from PICK_REMOTE into refs/journal/pick and check COMMIT came with it: fetch_pick BRANCH COMMIT GIT...
+# (Functions here share variables, and snap uses short names: these keep to their own.)
+fetch_pick() {
+  fp_b=$1 fp_c=$2; shift 2
+  "$@" -c "http.extraHeader=Authorization: Bearer $PICK_TOKEN" fetch -q --no-tags "$PICK_REMOTE" "+refs/heads/$fp_b:refs/journal/pick" || return 1
+  "$@" cat-file -e "$fp_c^{commit}" 2>/dev/null || { echo "commit $fp_c is not on $fp_b" >&2; return 1; }
+}
+
+pick() {
+  pk_b=$1 pk_c=$2 pk_p=${3:-}
+  [ -n "${PICK_REMOTE:-}" ] && [ -n "${PICK_TOKEN:-}" ] || { echo "no remote" >&2; exit 2; }
+  case $pk_p in /*|../*|*/../*|*/..|..) echo "bad path" >&2; exit 2 ;; esac
+  pk_short=$(echo "$pk_c" | cut -c1-12)
+  if [ "$pk_b" = home ]; then
+    [ -d "$J" ] || GIT_DIR=$J git init -q -b home
+    pk_root=$HOME pk_ref=refs/heads/home
+    set -- git --git-dir="$J" --work-tree="$HOME"
+    fetch_pick "$pk_b" "$pk_c" "$@" || exit 1
+    home
+  else
+    pk_root=$(top_for "$pk_b") || { echo "no project for $pk_b" >&2; exit 1; }
+    pk_ref=refs/journal/work
+    set -- git -C "$pk_root"
+    fetch_pick "$pk_b" "$pk_c" "$@" || exit 1
+    snap "$pk_root" "before restoring ${pk_p:-everything} to $pk_short"
+  fi
+  (
+    cd "$pk_root" || exit 1
+    if [ -n "$pk_p" ]; then
+      if "$@" cat-file -e "$pk_c:$pk_p" 2>/dev/null; then
+        "$@" restore --source="$pk_c" --worktree -- "$pk_p"
+      else
+        rm -f -- "$pk_p"  # it did not exist then
+      fi
+    else
+      pk_old=$("$@" rev-parse -q --verify "$pk_ref")
+      if [ -n "$pk_old" ]; then
+        "$@" diff --name-only -z --no-renames --diff-filter=D "$pk_old" "$pk_c" | xargs -0r rm -f --
+        "$@" diff --name-only -z --no-renames --diff-filter=d "$pk_old" "$pk_c" | xargs -0r "$@" restore --source="$pk_c" --worktree --
+      else
+        "$@" restore --source="$pk_c" --worktree -- .
+      fi
+    fi
+  ) || exit 1
+  if [ "$pk_b" = home ]; then home; else snap "$pk_root" "restored ${pk_p:-everything} to $pk_short"; fi
+  echo "picked $pk_b"
+}
+
+share() {
+  sh_b=$1 sh_c=$2
+  [ -n "${SHARE_REMOTE:-}" ] && [ -n "${SHARE_TOKEN:-}" ] && [ -n "${PICK_REMOTE:-}" ] && [ -n "${PICK_TOKEN:-}" ] || { echo "no remote" >&2; exit 2; }
+  case $sh_b in work/*) ;; *) echo "only projects can be shared" >&2; exit 2 ;; esac
+  sh_root=$(top_for "$sh_b") || exit 1
+  fetch_pick "$sh_b" "$sh_c" git -C "$sh_root" || exit 1
+  sh_one=$(printf 'Shared from herdr-cloud: %s at %s\n' "${sh_b#work/}" "$(git -C "$sh_root" log -1 --format=%cI "$sh_c")" | git -C "$sh_root" commit-tree "$sh_c^{tree}") || exit 1
+  git -C "$sh_root" -c "http.extraHeader=Authorization: Bearer $SHARE_TOKEN" push -q "$SHARE_REMOTE" "$sh_one:refs/heads/main" || exit 1
+  echo "shared $sh_b"
+}
+
 case ${1:-} in
   home) home ;;
+  pick) pick "${2:?branch}" "${3:?commit}" "${4:-}" ;;
+  share) share "${2:?branch}" "${3:?commit}" ;;
+  forget-pushed)
+    [ -d "$J" ] && git --git-dir="$J" update-ref -d refs/journal/pushed
+    [ -s "$REPOS" ] && while read -r top; do
+      [ -d "$top" ] && git -C "$top" update-ref -d refs/journal/pushed
+    done < "$REPOS"
+    exit 0
+    ;;
   snap) snap "${2:-$PWD}" "${3:-}" ;;
   tick)
     [ -x /opt/herdr-cloud/save-shells.sh ] && /opt/herdr-cloud/save-shells.sh
@@ -188,5 +279,5 @@ case ${1:-} in
     done < "$REPOS"
     exit "${failed:-0}"
     ;;
-  *) echo "usage: journal.sh home|snap DIR [MSG]|tick|push|restore|size|rollover" >&2; exit 2 ;;
+  *) echo "usage: journal.sh home|snap DIR [MSG]|tick|push|restore|size|rollover|pick BRANCH COMMIT [PATH]|share BRANCH COMMIT|forget-pushed" >&2; exit 2 ;;
 esac
